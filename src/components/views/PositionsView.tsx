@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { OctagonX } from 'lucide-react';
+import { READONLY_CONTROL_NOTE } from '../../api/readonly';
 import {
   AgentId,
   AgentSummary,
   RouteKey,
   StatusResponse,
   TimelineEvent,
-  UserRole,
 } from '../../types/triade';
 import {
   AGENT_CURRENCIES,
@@ -21,11 +21,9 @@ import { EmptyState, ModeBadge, StatusBadge } from '../ui/Primitives';
 export const PositionsView: React.FC<{
   status: StatusResponse | null;
   timelineEvents: TimelineEvent[];
-  role: UserRole;
   offline: boolean;
   onNavigate: (route: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => void;
-  onFlattenAgent: (agent: AgentSummary) => void;
-}> = ({ status, timelineEvents, role, offline, onNavigate, onFlattenAgent }) => {
+}> = ({ status, timelineEvents, offline, onNavigate }) => {
   const [agentFilter, setAgentFilter] = useState<AgentId | 'all'>('all');
   const [symbolFilter, setSymbolFilter] = useState('');
 
@@ -102,20 +100,18 @@ export const PositionsView: React.FC<{
               Posições abertas ({openPositions.length})
             </h2>
             <p className="text-[11px] text-[#8b9bb4]">
-              Clique em uma linha para abrir a timeline filtrada pelo client_order_id. Não há
-              flatten por símbolo no CLI; o zeramento atua no agente inteiro (flatten_all).
+              Clique em uma linha para abrir a timeline filtrada pelo client_order_id. Flatten
+              não é enviado: o backend responde 405.
             </p>
           </div>
-          {agentFilter !== 'all' && status && role === 'owner' && (
-            <button
-              type="button"
-              disabled={offline}
-              onClick={() => onFlattenAgent(status.agents[agentFilter])}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#f85149] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-45"
-            >
-              <OctagonX className="h-3.5 w-3.5" /> Zerar este agente
-            </button>
-          )}
+          <button
+            type="button"
+            disabled
+            title={offline ? `${READONLY_CONTROL_NOTE} Túnel indisponível.` : READONLY_CONTROL_NOTE}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs font-medium text-[#8b9bb4] opacity-70 cursor-not-allowed"
+          >
+            <OctagonX className="h-3.5 w-3.5" /> Zerar indisponível
+          </button>
         </div>
 
         {openPositions.length === 0 ? (
@@ -141,7 +137,6 @@ export const PositionsView: React.FC<{
                   <th className="px-4 py-2.5">Fonte / Estratégia</th>
                   <th className="px-4 py-2.5">Aberto em (BRT)</th>
                   <th className="px-4 py-2.5">ID</th>
-                  {role === 'owner' && <th className="px-4 py-2.5 text-right">Ação</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#30363d] font-mono tabular-nums">
@@ -206,21 +201,6 @@ export const PositionsView: React.FC<{
                       {formatBrasiliaTime(pos.opened_at)}
                     </td>
                     <td className="px-4 py-3 text-[#7aa2f7]">{pos.client_order_id}</td>
-                    {role === 'owner' && (
-                      <td
-                        className="px-4 py-3 text-right"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <button
-                          type="button"
-                          disabled={offline}
-                          onClick={() => onFlattenAgent(agent)}
-                          className="rounded border border-[#f85149]/50 bg-[#f85149]/10 px-2 py-1 text-[11px] font-sans font-semibold text-[#f85149] hover:bg-[#f85149]/20 disabled:opacity-45"
-                        >
-                          Zerar agente
-                        </button>
-                      </td>
-                    )}
                   </tr>
                 ))}
               </tbody>

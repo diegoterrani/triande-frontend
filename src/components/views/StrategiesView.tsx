@@ -2,10 +2,10 @@ import React, { useState } from 'react';
 import { Lock } from 'lucide-react';
 import { AgentId, StrategyConfig } from '../../types/triade';
 import { AGENT_NAMES } from '../../utils/format';
-import { ModeBadge, StatusBadge } from '../ui/Primitives';
+import { EmptyState, ModeBadge, StatusBadge } from '../ui/Primitives';
 
 export const StrategiesView: React.FC<{
-  configs: Record<AgentId, StrategyConfig>;
+  configs: Partial<Record<AgentId, StrategyConfig>>;
 }> = ({ configs }) => {
   const [agent, setAgent] = useState<AgentId>('b3');
   const cfg = configs[agent];
@@ -38,6 +38,14 @@ export const StrategiesView: React.FC<{
         </div>
       </div>
 
+      {!cfg ? (
+        <EmptyState
+          title={`Configuração de ${AGENT_NAMES[agent]} indisponível`}
+          detail="GET /api/v2/config não devolveu este agente. Nada é preenchido com valores de exemplo."
+          missingPath={`configs/${agent}.yaml`}
+        />
+      ) : (
+        <>
       {/* Header meta */}
       <div className="rounded-xl border border-[#30363d] bg-[#161b22] px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-2.5">
@@ -100,7 +108,7 @@ export const StrategiesView: React.FC<{
             <div className="py-2 flex items-center justify-between gap-4">
               <dt className="font-mono text-[#8b9bb4]">fee_per_unit_side / slippage_ticks</dt>
               <dd className="font-mono text-[#e6edf3]">
-                {cfg.costs.fee_per_unit_side} / {cfg.costs.slippage_ticks} tick(s)
+                {cfg.costs.fee_per_unit_side ?? '—'} / {cfg.costs.slippage_ticks ?? '—'} tick(s)
               </dd>
             </div>
           </dl>
@@ -145,13 +153,19 @@ export const StrategiesView: React.FC<{
             Não é permitido editar pelo painel: <code className="text-[#e6edf3]">live_enabled</code>,{' '}
             <code className="text-[#e6edf3]">mt5.demo</code>, credenciais,{' '}
             <code className="text-[#e6edf3]">DAYTRADE_LIVE_CONFIRM</code>, binds de rede ou magic
-            number.
+            number. O painel não grava YAML.
           </p>
           <div className="text-[11px] font-mono text-[#8b9bb4] pt-1">
-            Chaves de ambiente referenciadas (apenas nomes): {cfg.env_key_names_only.join(', ')}
+            Chaves de ambiente referenciadas (apenas nomes): {cfg.env_key_names_only.join(', ') || '—'}
           </div>
+          <p className="text-[11px] text-[#8b9bb4]">
+            micro_live.equity, se aparecer acima, é parâmetro de sizing — não é saldo da corretora.
+            Custos: {cfg.costs.fee_per_unit_side ?? '—'} / {cfg.costs.slippage_ticks ?? '—'} tick(s).
+          </p>
         </section>
       </div>
+        </>
+      )}
     </div>
   );
 };

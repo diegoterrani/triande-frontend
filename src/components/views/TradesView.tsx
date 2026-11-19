@@ -1,5 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
 import { Download } from 'lucide-react';
+import { LiveRevisionContext } from '../../api/liveContext';
+import { triadeApi } from '../../api/triade';
 import { AgentId, RouteKey, TimelineEvent } from '../../types/triade';
 import {
   AGENT_CURRENCIES,
@@ -9,23 +11,45 @@ import {
   formatMoney,
   formatPrice,
 } from '../../utils/format';
-import { EmptyState, ModeBadge } from '../ui/Primitives';
+import { EmptyState, ErrorState, ModeBadge } from '../ui/Primitives';
 
 export const TradesView: React.FC<{
-  timelineEvents: TimelineEvent[];
   onNavigate: (route: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => void;
-}> = ({ timelineEvents, onNavigate }) => {
+}> = ({ onNavigate }) => {
   const [agent, setAgent] = useState<AgentId | 'all'>('all');
   const [mode, setMode] = useState<'all' | 'live' | 'paper'>('all');
   const [source, setSource] = useState<'all' | 'python' | 'llm'>('all');
   const [symbol, setSymbol] = useState('');
   const [onlyLosses, setOnlyLosses] = useState(false);
+  const [loaded, setLoaded] = useState<TimelineEvent[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const revision = useContext(LiveRevisionContext);
+
+  useEffect(() => {
+    let cancel = false;
+    setLoading(true);
+    triadeApi
+      .getTrades({ agent, mode, limit: 1000 })
+      .then((rows) => {
+        if (!cancel) {
+          setLoaded(rows);
+          setError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancel) setError(err instanceof Error ? err.message : 'Falha ao carregar trades');
+      })
+      .finally(() => {
+        if (!cancel) setLoading(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [agent, mode, revision]);
 
   const trades = useMemo(() => {
-    return timelineEvents.filter((ev) => {
-      if (ev.event !== 'trade') return false;
-      if (agent !== 'all' && ev.agent !== agent) return false;
-      if (mode !== 'all' && ev.mode !== mode) return false;
+    return loaded.filter((ev) => {
       if (source !== 'all' && ev.source !== source) return false;
       if (onlyLosses && (ev.pnl ?? 0) >= 0) return false;
       if (symbol.trim() && !(ev.symbol ?? '').toLowerCase().includes(symbol.trim().toLowerCase())) {
@@ -33,7 +57,7 @@ export const TradesView: React.FC<{
       }
       return true;
     });
-  }, [timelineEvents, agent, mode, source, onlyLosses, symbol]);
+  }, [loaded, source, onlyLosses, symbol]);
 
   const handleExport = () => {
     downloadCsv(
@@ -83,7 +107,7 @@ export const TradesView: React.FC<{
         <div>
           <h1 className="text-[22px] font-semibold text-[#e6edf3]">Histórico de trades</h1>
           <p className="text-xs text-[#8b9bb4] mt-0.5">
-            Derivado de event=trade no journal · clique em uma linha para abrir a timeline pelo ID
+            GET /api/v2/trades (event=trade). Lista vazia é o estado real — a B3 live pode ainda não ter trade.
           </p>
         </div>
 
@@ -96,6 +120,9 @@ export const TradesView: React.FC<{
           <Download className="h-3.5 w-3.5" /> Exportar CSV
         </button>
       </div>
+
+      {error && <ErrorState message={error} />}
+      {loading && <p className="text-xs text-[#8b9bb4]">Carregando trades…</p>}
 
       {/* Filters */}
       <div className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">

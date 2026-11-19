@@ -1,30 +1,41 @@
 import {
-  BACKTEST_REPORTS,
-  STRATEGY_CONFIGS,
-  previewStore,
-} from '../data/specPreviewData';
+  annotateAlertModes,
+  attachInfra,
+  buildQuery,
+  mapAlerts,
+  mapAnalystEvents,
+  mapAudit,
+  mapBacktests,
+  mapBars,
+  mapHealth,
+  mapInfra,
+  mapLogs,
+  mapPnl,
+  mapRisk,
+  mapStatus,
+  mapStrategy,
+  mapTimeline,
+  mapTrades,
+  telegramFlagFromConfig,
+} from './map';
+import { READONLY_CONTROL_NOTE } from './readonly';
 import {
-  ActionResponse,
   AgentId,
-  AlertItem,
+  AlertsPayload,
   AnalystEvent,
-  ApiTokenRecord,
-  AuditEntry,
+  AuditPayload,
   BacktestReport,
   ConnectionState,
-  DangerActionPayload,
   HealthResponse,
   InfraResponse,
-  LogEntry,
-  PreviewScenario,
+  LogsPayload,
+  PnlResponse,
   RecentBarsResponse,
   RiskResponse,
   StatusResponse,
   StrategyConfig,
   TimelineEvent,
   TimelineResponse,
-  UserOperator,
-  UserRole,
 } from '../types/triade';
 
 export interface TriadeClientConfig {
@@ -32,14 +43,36 @@ export interface TriadeClientConfig {
   token: string;
 }
 
-const ENV_API_BASE = (import.meta.env.VITE_TRIADE_API_BASE as string | undefined)?.trim() || '';
+function readEnvBase(): string {
+  const fromApi = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+  const fromLegacy = (import.meta.env.VITE_TRIADE_API_BASE as string | undefined)?.trim();
+  return (fromApi || fromLegacy || '').replace(/\/+$/, '');
+}
+
 const ENV_TOKEN = (import.meta.env.VITE_TRIADE_TOKEN as string | undefined)?.trim() || '';
 
-class TriadeApiClient {
-  private apiBase: string = ENV_API_BASE;
-  private token: string = ENV_TOKEN;
+export class TriadeApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'TriadeApiError';
+    this.status = status;
+  }
+}
 
-  isUsingRemoteVps(): boolean {
+/**
+ * Typed client for the read-only TRIADE dashboard API (`/api/v2`).
+ * Empty base URL means same-origin (the SPA served under `/app`).
+ * Dev over the SSH tunnel uses `VITE_API_BASE=http://127.0.0.1:8765`.
+ */
+export class TriadeApiClient {
+  private apiBase: string = readEnvBase();
+  private token: string = ENV_TOKEN;
+  private localAck = new Set<string>();
+  private agentModes: Partial<Record<AgentId, 'live' | 'paper'>> = {};
+
+  /** True when requests go to an explicit origin (tunnel), not same-origin `/app`. */
+  isCrossOrigin(): boolean {
     return Boolean(this.apiBase);
   }
 
@@ -50,76 +83,86 @@ class TriadeApiClient {
     };
   }
 
-  setConnection(apiBase: string, token: string): void {
+  setConnection(apiBase: string, token?: string): void {
     this.apiBase = apiBase.trim().replace(/\/+$/, '');
-    if (token.trim()) {
+    if (token !== undefined && token.trim()) {
       this.token = token.trim();
     }
   }
 
-  clearToken(): void {
-    this.token = '';
-  }
-
-  hasToken(): boolean {
-    return Boolean(this.token);
-  }
-
-  private async requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  private async requestJson<T>(path: string, init?: RequestInit, timeoutMs = 20000): Promise<T> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
+      Accept: 'application/json',
       ...(init?.headers as Record<string, string> | undefined),
     };
-    if (this.token) {
-      headers.Authorization = `Bearer ${this.token}`;
-    }
+    if (init?.body) headers['Content-Type'] = 'application/json';
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
 
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 5000);
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.apiBase}${path}`, {
         ...init,
         headers,
         signal: controller.signal,
+        cache: 'no-store',
       });
       const json = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
       if (!res.ok) {
-        throw new Error(json?.error || `Erro HTTP ${res.status}`);
+        const message =
+          typeof json?.error === 'string' && json.error
+            ? json.error
+            : `Erro HTTP ${res.status}`;
+        throw new TriadeApiError(message, res.status);
       }
       return json as T;
+    } catch (err) {
+      if (err instanceof TriadeApiError) throw err;
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new TriadeApiError(
+          'sem conexão com o VPS (túnel 127.0.0.1:8765 indisponível ou tempo esgotado)',
+          0
+        );
+      }
+      const message = err instanceof Error ? err.message : 'sem conexão com o VPS';
+      throw new TriadeApiError(
+        message === 'Failed to fetch'
+          ? 'sem conexão com o VPS (túnel SSH indisponível ou CORS recusado)'
+          : message,
+        0
+      );
     } finally {
       window.clearTimeout(timer);
     }
   }
 
   async getHealth(): Promise<HealthResponse> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS (127.0.0.1:8765 indisponível)');
-      }
-      return {
-        ok: true,
-        bind: '127.0.0.1:8765',
-        readonly: false,
-        uptime_seconds: 18420,
-        version: '1.0.0',
-        auth_required: true,
-      };
-    }
-    return this.requestJson<HealthResponse>('/api/health');
+    return mapHealth(await this.requestJson<unknown>('/api/v2/health'));
   }
 
   async getStatus(): Promise<StatusResponse> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS (timeout em /api/status)');
-      }
-      return previewStore.getStatus();
-    }
+    const status = mapStatus(await this.requestJson<unknown>('/api/v2/status'));
+    this.agentModes = {
+      b3: status.agents.b3.live_enabled ? 'live' : 'paper',
+      nasdaq: status.agents.nasdaq.live_enabled ? 'live' : 'paper',
+      crypto: status.agents.crypto.live_enabled ? 'live' : 'paper',
+    };
+    return status;
+  }
+
+  async getInfra(): Promise<InfraResponse> {
+    return mapInfra(await this.requestJson<unknown>('/api/v2/infra'));
+  }
+
+  /** Status enriched with bridge ports from `/api/v2/infra` when that call succeeds. */
+  async getStatusWithInfra(): Promise<{ status: StatusResponse; infra: InfraResponse | null; infraError: string | null }> {
+    const status = await this.getStatus();
     try {
-      return await this.requestJson<StatusResponse>('/api/v2/status');
-    } catch {
-      return this.requestJson<StatusResponse>('/api/status');
+      const infra = await this.getInfra();
+      return { status: attachInfra(status, infra), infra, infraError: null };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'infra indisponível';
+      return { status, infra: null, infraError: message };
     }
   }
 
@@ -130,99 +173,134 @@ class TriadeApiClient {
     after?: string | null;
     limit?: number;
     mode?: 'all' | 'live' | 'paper';
+    event?: string;
+    source?: string;
   }): Promise<TimelineResponse> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS (/api/timeline indisponível)');
-      }
-      return previewStore.getTimeline(params);
-    }
-    const qs = new URLSearchParams();
-    if (params?.agent && params.agent !== 'all') qs.set('agent', params.agent);
-    if (params?.since) qs.set('since', params.since);
-    if (params?.until) qs.set('until', params.until);
-    if (params?.after) qs.set('after', params.after);
-    if (params?.limit) qs.set('limit', String(params.limit));
-    return this.requestJson<TimelineResponse>(`/api/timeline?${qs.toString()}`);
+    const qs = buildQuery(
+      {
+        agent: params?.agent,
+        since: params?.since,
+        until: params?.until,
+        after: params?.after,
+        limit: params?.limit,
+        mode: params?.mode,
+        event: params?.event,
+        source: params?.source,
+      },
+      { keepAll: true }
+    );
+    return mapTimeline(await this.requestJson<unknown>(`/api/v2/timeline${qs}`));
+  }
+
+  async getTrades(params?: {
+    agent?: AgentId | 'all';
+    mode?: 'all' | 'live' | 'paper';
+    since?: string;
+    until?: string;
+    limit?: number;
+  }): Promise<TimelineEvent[]> {
+    const qs = buildQuery(
+      {
+        agent: params?.agent,
+        mode: params?.mode,
+        since: params?.since,
+        until: params?.until,
+        limit: params?.limit ?? 1000,
+      },
+      { keepAll: true }
+    );
+    return mapTrades(await this.requestJson<unknown>(`/api/v2/trades${qs}`));
+  }
+
+  async getPnl(
+    agent: AgentId,
+    params?: { mode?: 'live' | 'paper' | 'all'; since?: string; until?: string; limit?: number }
+  ): Promise<PnlResponse> {
+    const qs = buildQuery({
+      mode: params?.mode,
+      since: params?.since,
+      until: params?.until,
+      limit: params?.limit ?? 1000,
+    });
+    return mapPnl(await this.requestJson<unknown>(`/api/v2/agents/${agent}/pnl${qs}`), agent);
   }
 
   async getAnalystEvents(agent?: AgentId | 'all'): Promise<AnalystEvent[]> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) return [];
-      return previewStore.getAnalystEvents(agent);
-    }
-    const qs = agent && agent !== 'all' ? `?agent=${agent}` : '';
-    const res = await this.requestJson<{ events: AnalystEvent[] }>(`/api/v2/events${qs}`);
-    return res.events ?? [];
+    const qs = buildQuery({ agent });
+    const payload = mapAnalystEvents(await this.requestJson<unknown>(`/api/v2/events${qs}`));
+    return payload.events;
   }
 
   async getRisk(agent: AgentId, profile?: 'micro_live' | 'research'): Promise<RiskResponse> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS (/api/v2/agents/risk indisponível)');
-      }
-      return previewStore.getRisk(agent, profile);
-    }
     const qs = profile ? `?profile=${profile}` : '';
-    return this.requestJson<RiskResponse>(`/api/v2/agents/${agent}/risk${qs}`);
+    return mapRisk(await this.requestJson<unknown>(`/api/v2/agents/${agent}/risk${qs}`), agent);
   }
 
   async getBacktests(): Promise<BacktestReport[]> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS');
-      }
-      return BACKTEST_REPORTS;
-    }
-    const res = await this.requestJson<{ reports: BacktestReport[] }>('/api/v2/backtests');
-    return res.reports ?? [];
+    return mapBacktests(await this.requestJson<unknown>('/api/v2/backtests'));
   }
 
-  async getStrategies(): Promise<Record<AgentId, StrategyConfig>> {
-    if (!this.isUsingRemoteVps()) {
-      return STRATEGY_CONFIGS;
-    }
-    const [b3, nasdaq, crypto] = await Promise.all([
-      this.requestJson<StrategyConfig>('/api/v2/config/b3'),
-      this.requestJson<StrategyConfig>('/api/v2/config/nasdaq'),
-      this.requestJson<StrategyConfig>('/api/v2/config/crypto'),
-    ]);
-    return { b3, nasdaq, crypto };
-  }
-
-  async getInfra(): Promise<InfraResponse> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS (/api/v2/infra)');
-      }
-      return previewStore.getInfra();
-    }
-    return this.requestJson<InfraResponse>('/api/v2/infra');
-  }
-
-  async getAlerts(): Promise<AlertItem[]> {
-    if (!this.isUsingRemoteVps()) {
-      return previewStore.getAlerts();
-    }
-    return previewStore.getAlerts();
-  }
-
-  ackAlert(id: string): AlertItem[] {
-    return previewStore.acknowledgeAlert(id);
-  }
-
-  async getLogs(agent: AgentId, mode: 'effective' | 'live' | 'paper' = 'effective'): Promise<LogEntry[]> {
-    if (!this.isUsingRemoteVps()) {
-      return previewStore.getLogs(agent, mode);
-    }
-    const res = await this.requestJson<{ logs: LogEntry[] }>(
-      `/api/v2/logs?agent=${agent}&mode=${mode}&n=100`
+  async getStrategies(): Promise<Partial<Record<AgentId, StrategyConfig>>> {
+    const ids: AgentId[] = ['b3', 'nasdaq', 'crypto'];
+    const entries = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const raw = await this.requestJson<unknown>(`/api/v2/config/${id}`);
+          return [id, mapStrategy(raw, id)] as const;
+        } catch {
+          return [id, null] as const;
+        }
+      })
     );
-    return res.logs ?? [];
+    const out: Partial<Record<AgentId, StrategyConfig>> = {};
+    for (const [id, config] of entries) {
+      if (config) out[id] = config;
+    }
+    return out;
   }
 
-  getSystemJournal(agent: AgentId): string[] {
-    return previewStore.getSystemJournalLogs(agent);
+  async getTelegramFlags(): Promise<Record<AgentId, boolean | null>> {
+    const ids: AgentId[] = ['b3', 'nasdaq', 'crypto'];
+    const entries = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const raw = await this.requestJson<unknown>(`/api/v2/config/${id}`);
+          return [id, telegramFlagFromConfig(raw)] as const;
+        } catch {
+          return [id, null] as const;
+        }
+      })
+    );
+    return Object.fromEntries(entries) as Record<AgentId, boolean | null>;
+  }
+
+  async getAlerts(): Promise<AlertsPayload> {
+    const payload = mapAlerts(
+      await this.requestJson<unknown>('/api/v2/alerts'),
+      this.agentModes
+    );
+    return {
+      ...payload,
+      alerts: payload.alerts.map((alert) =>
+        this.localAck.has(alert.id) ? { ...alert, acknowledged: true } : alert
+      ),
+    };
+  }
+
+  /** Local hide only. The server does not persist acknowledgements. */
+  ackAlertLocal(id: string, current: AlertsPayload): AlertsPayload {
+    this.localAck.add(id);
+    return {
+      ...current,
+      alerts: current.alerts.map((alert) =>
+        alert.id === id ? { ...alert, acknowledged: true } : alert
+      ),
+    };
+  }
+
+  async getLogs(agent: AgentId, mode: 'effective' | 'live' | 'paper' = 'effective'): Promise<LogsPayload> {
+    const qs = buildQuery({ agent, mode, n: 100 }, { keepAll: true });
+    return mapLogs(await this.requestJson<unknown>(`/api/v2/logs${qs}`), agent);
   }
 
   async getRecentBars(
@@ -230,84 +308,20 @@ class TriadeApiClient {
     symbol?: string,
     timeframe: '1m' | '5m' | '15m' = '5m'
   ): Promise<RecentBarsResponse> {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        throw new Error('sem conexão com o VPS (recent-bars.json indisponível)');
-      }
-      return previewStore.getRecentBars(agent, symbol, timeframe);
-    }
-    const qs = new URLSearchParams();
-    if (symbol) qs.set('symbol', symbol);
-    qs.set('tf', timeframe);
-    return this.requestJson<RecentBarsResponse>(`/api/v2/agents/${agent}/bars?${qs.toString()}`);
+    const qs = buildQuery({ symbol, tf: timeframe }, { keepAll: true });
+    return mapBars(await this.requestJson<unknown>(`/api/v2/agents/${agent}/bars${qs}`), agent, timeframe);
   }
 
-  async getAudit(): Promise<AuditEntry[]> {
-    if (!this.isUsingRemoteVps()) {
-      return previewStore.getAudit();
-    }
-    const res = await this.requestJson<{ entries: AuditEntry[] }>('/api/v2/audit');
-    return res.entries ?? [];
+  async getAudit(): Promise<AuditPayload> {
+    return mapAudit(await this.requestJson<unknown>('/api/v2/audit'));
   }
 
-  getUsers(): UserOperator[] {
-    return previewStore.getUsers();
-  }
-
-  getTokens(): ApiTokenRecord[] {
-    return previewStore.getTokens();
-  }
-
-  issueToken(label: string, role: UserRole): { record: ApiTokenRecord; plaintextOnce: string } {
-    return previewStore.issueToken(label, role);
-  }
-
-  revokeToken(id: string): ApiTokenRecord[] {
-    return previewStore.revokeToken(id);
-  }
-
-  getTelegramEnabled(): boolean {
-    return previewStore.getTelegramEnabled();
-  }
-
-  setTelegramEnabled(val: boolean): boolean {
-    return previewStore.setTelegramEnabled(val);
-  }
-
-  setPreviewScenario(scenario: PreviewScenario): void {
-    previewStore.setScenario(scenario);
-  }
-
-  getPreviewScenario(): PreviewScenario {
-    return previewStore.getScenario();
-  }
-
-  async executeDangerAction(
-    payload: DangerActionPayload,
-    actor: { name: string; role: UserRole }
-  ): Promise<ActionResponse> {
-    if (!this.isUsingRemoteVps()) {
-      return previewStore.executeDangerAction(payload, actor);
-    }
-
-    let endpoint = '';
-    if (payload.action === 'kill_all') endpoint = '/api/v2/kill-all';
-    else if (payload.action === 'kill') endpoint = `/api/v2/agents/${payload.agent}/kill`;
-    else if (payload.action === 'flatten') endpoint = `/api/v2/agents/${payload.agent}/flatten`;
-    else if (payload.action === 'kill_clear') endpoint = `/api/v2/agents/${payload.agent}/kill/clear`;
-    else if (payload.action === 'reset_halt') endpoint = `/api/v2/agents/${payload.agent}/reset-halt`;
-    else if (payload.action === 'unit_stop') endpoint = `/api/v2/agents/${payload.agent}/unit/stop`;
-    else if (payload.action === 'unit_start') endpoint = `/api/v2/agents/${payload.agent}/unit/start`;
-
-    return this.requestJson<ActionResponse>(endpoint, {
-      method: 'POST',
-      body: JSON.stringify({
-        confirm_agent: payload.confirm_agent,
-        confirm_word: payload.confirm_word,
-        reason: payload.reason,
-        otp: payload.otp,
-      }),
-    });
+  /**
+   * Control routes are intentionally not called. The live B3 account must not
+   * receive kill/flatten/start from an unauthenticated panel.
+   */
+  refuseDangerAction(): never {
+    throw new TriadeApiError(READONLY_CONTROL_NOTE, 405);
   }
 
   subscribeStream(handlers: {
@@ -315,43 +329,61 @@ class TriadeApiClient {
     onJournalEvent: (ev: TimelineEvent) => void;
     onStatusTick: () => void;
   }): () => void {
-    if (!this.isUsingRemoteVps()) {
-      if (previewStore.isOffline()) {
-        handlers.onConnectionChange('offline');
-        return () => {};
-      }
-      handlers.onConnectionChange('sse');
-      const timer = window.setInterval(() => {
-        if (previewStore.isOffline()) {
-          handlers.onConnectionChange('offline');
-        } else {
-          handlers.onConnectionChange('sse');
-          handlers.onStatusTick();
-        }
-      }, 5000);
-      return () => window.clearInterval(timer);
-    }
-
+    let stopped = false;
     let es: EventSource | null = null;
     let pollTimer: number | null = null;
+    let retryTimer: number | null = null;
+    let attempt = 0;
 
-    const startPollingFallback = () => {
-      if (pollTimer !== null) return;
+    const stopPoll = () => {
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const startPoll = () => {
+      if (pollTimer !== null || stopped) return;
       handlers.onConnectionChange('polling');
       pollTimer = window.setInterval(() => {
         handlers.onStatusTick();
       }, 5000);
     };
 
-    try {
-      es = new EventSource(`${this.apiBase}/api/v2/stream?agent=all`);
+    const scheduleRetry = () => {
+      if (stopped || retryTimer !== null) return;
+      const delay = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        connect();
+      }, delay);
+    };
+
+    const connect = () => {
+      if (stopped) return;
+      if (typeof EventSource === 'undefined') {
+        startPoll();
+        return;
+      }
+      try {
+        es = new EventSource(`${this.apiBase}/api/v2/stream?agent=all`);
+      } catch {
+        handlers.onConnectionChange('reconnecting');
+        startPoll();
+        attempt += 1;
+        scheduleRetry();
+        return;
+      }
       es.addEventListener('hello', () => {
+        attempt = 0;
+        stopPoll();
         handlers.onConnectionChange('sse');
       });
-      es.addEventListener('journal', (e) => {
+      es.addEventListener('journal', (event) => {
         try {
-          const data = JSON.parse((e as MessageEvent).data) as TimelineEvent;
-          handlers.onJournalEvent(data);
+          const data = JSON.parse((event as MessageEvent).data) as unknown;
+          const mapped = mapTimeline({ events: [data], ok: true }).events[0];
+          if (mapped) handlers.onJournalEvent(mapped);
         } catch {
           // ignore malformed SSE frame
         }
@@ -359,20 +391,30 @@ class TriadeApiClient {
       es.addEventListener('status', () => {
         handlers.onStatusTick();
       });
+      es.addEventListener('ping', () => {
+        if (attempt === 0) handlers.onConnectionChange('sse');
+      });
       es.onerror = () => {
         handlers.onConnectionChange('reconnecting');
         es?.close();
-        startPollingFallback();
+        es = null;
+        attempt += 1;
+        if (attempt >= 2) startPoll();
+        scheduleRetry();
       };
-    } catch {
-      startPollingFallback();
-    }
+    };
+
+    connect();
 
     return () => {
+      stopped = true;
       es?.close();
-      if (pollTimer !== null) window.clearInterval(pollTimer);
+      stopPoll();
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }
 }
 
 export const triadeApi = new TriadeApiClient();
+
+export { annotateAlertModes, attachInfra };

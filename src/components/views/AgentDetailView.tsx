@@ -9,18 +9,17 @@ import {
   ShieldAlert,
   Square,
 } from 'lucide-react';
+import { READONLY_CONTROL_NOTE } from '../../api/readonly';
 import { triadeApi } from '../../api/triade';
 import {
   AgentId,
   AgentSummary,
   AnalystEvent,
-  DangerActionType,
   RecentBarsResponse,
   RiskResponse,
   RouteKey,
   StrategyConfig,
   TimelineEvent,
-  UserRole,
 } from '../../types/triade';
 import { MarketChartPanel } from '../charts/MarketChartPanel';
 import {
@@ -53,21 +52,17 @@ export const AgentDetailView: React.FC<{
   agent: AgentSummary | null;
   timelineEvents: TimelineEvent[];
   analystEvents: AnalystEvent[];
-  strategyConfig: StrategyConfig;
-  role: UserRole;
+  strategyConfig: StrategyConfig | null;
   offline: boolean;
   onNavigate: (route: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => void;
-  onTriggerDanger: (action: DangerActionType, agent: AgentSummary) => void;
 }> = ({
   agentId,
   agent,
   timelineEvents,
   analystEvents,
   strategyConfig,
-  role,
   offline,
   onNavigate,
-  onTriggerDanger,
 }) => {
   const [viewMode, setViewMode] = useState<'effective' | 'paper'>('effective');
   const [risk, setRisk] = useState<RiskResponse | null>(null);
@@ -117,7 +112,9 @@ export const AgentDetailView: React.FC<{
   const displayState = showingPaperState ? agent.paper_state! : agent.state;
   const agentTimeline = timelineEvents.filter((e) => e.agent === agentId).slice(0, 50);
   const agentAnalyst = analystEvents.filter((e) => e.agent === agentId);
-  const phase = PHASE_LABELS[agent.session_phase ?? 'outside_session'];
+  const phase = agent.session_phase
+    ? PHASE_LABELS[agent.session_phase]
+    : { label: 'Sem janela de sessão no YAML', tone: 'neutral' as const };
 
   const handleExportCsv = () => {
     downloadCsv(
@@ -280,9 +277,12 @@ export const AgentDetailView: React.FC<{
           <div className="mt-4 flex items-start gap-2 rounded-lg border border-[#d29922]/50 bg-[#d29922]/10 px-3 py-2.5 text-xs text-[#d29922]">
             <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
             <span>
-              <strong>Halt persistente por drawdown máximo (sticky_halt: true):</strong> este halt
-              sobrevive à virada do dia e foi configurado para não resetar automaticamente. Só
-              liberar se Diego pediu explicitamente.
+              <strong>
+                Halt{agent.state.sticky_halt ? ' persistente (sticky_halt)' : ''}:{' '}
+                {agent.state.halt_reason ?? 'sem motivo informado'}
+              </strong>
+              {agent.state.day ? ` · dia do estado ${agent.state.day}` : ''}. O painel não reseta
+              este halt.
             </span>
           </div>
         )}
@@ -306,11 +306,13 @@ export const AgentDetailView: React.FC<{
               label="PnL realizado hoje"
               value={formatMoney(displayState.realized_pnl_today, agent.currency, true)}
               tone={
-                displayState.realized_pnl_today > 0
-                  ? 'good'
-                  : displayState.realized_pnl_today < 0
-                    ? 'bad'
-                    : 'default'
+                displayState.realized_pnl_today == null
+                  ? 'default'
+                  : displayState.realized_pnl_today > 0
+                    ? 'good'
+                    : displayState.realized_pnl_today < 0
+                      ? 'bad'
+                      : 'default'
               }
               large
             />
@@ -326,8 +328,16 @@ export const AgentDetailView: React.FC<{
           <div className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4">
             <MetricBlock
               label="Consumo de trades"
-              value={`${displayState.trades_today} / ${risk?.limits.max_trades_per_day ?? (agentId === 'b3' ? 5 : 4)}`}
-              subtext={`perdas seguidas: ${displayState.consecutive_losses ?? 0} / 3`}
+              value={
+                risk?.limits.max_trades_per_day != null
+                  ? `${displayState.trades_today ?? '—'} / ${risk.limits.max_trades_per_day}`
+                  : `${displayState.trades_today ?? '—'}`
+              }
+              subtext={
+                risk?.limits.max_consecutive_losses != null
+                  ? `perdas seguidas: ${displayState.consecutive_losses ?? '—'} / ${risk.limits.max_consecutive_losses}`
+                  : `perdas seguidas: ${displayState.consecutive_losses ?? '—'}`
+              }
               large
             />
           </div>
@@ -501,24 +511,42 @@ export const AgentDetailView: React.FC<{
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <UsageGauge
                 label="Perda do dia"
-                currentText={formatMoney(risk.usage.day_loss ?? 0, agent.currency)}
-                limitText={formatMoney(risk.limits.daily_loss_limit ?? 300, agent.currency)}
+                currentText={formatMoney(risk.usage.day_loss, agent.currency)}
+                limitText={
+                  risk.limits.daily_loss_limit != null
+                    ? formatMoney(risk.limits.daily_loss_limit, agent.currency)
+                    : '—'
+                }
                 ratio={risk.usage.day_loss_pct_of_limit}
                 source={risk.source_files.state}
               />
               <UsageGauge
                 label="Trades do dia"
-                currentText={String(risk.usage.trades_today)}
-                limitText={String(risk.limits.max_trades_per_day)}
-                ratio={risk.usage.trades_today / Math.max(1, risk.limits.max_trades_per_day)}
+                currentText={risk.usage.trades_today == null ? '—' : String(risk.usage.trades_today)}
+                limitText={
+                  risk.limits.max_trades_per_day == null ? '—' : String(risk.limits.max_trades_per_day)
+                }
+                ratio={
+                  risk.usage.trades_today != null && risk.limits.max_trades_per_day
+                    ? risk.usage.trades_today / risk.limits.max_trades_per_day
+                    : null
+                }
                 source={risk.source_files.config}
               />
               <UsageGauge
                 label="Perdas consecutivas"
-                currentText={String(risk.usage.consecutive_losses)}
-                limitText={String(risk.limits.max_consecutive_losses)}
+                currentText={
+                  risk.usage.consecutive_losses == null ? '—' : String(risk.usage.consecutive_losses)
+                }
+                limitText={
+                  risk.limits.max_consecutive_losses == null
+                    ? '—'
+                    : String(risk.limits.max_consecutive_losses)
+                }
                 ratio={
-                  risk.usage.consecutive_losses / Math.max(1, risk.limits.max_consecutive_losses)
+                  risk.usage.consecutive_losses != null && risk.limits.max_consecutive_losses
+                    ? risk.usage.consecutive_losses / risk.limits.max_consecutive_losses
+                    : null
                 }
                 source={risk.source_files.state}
               />
@@ -527,9 +555,9 @@ export const AgentDetailView: React.FC<{
                 currentText={formatPct(risk.usage.drawdown_pct)}
                 limitText={formatPct(risk.limits.max_drawdown_pct)}
                 ratio={
-                  risk.usage.drawdown_pct !== null
-                    ? risk.usage.drawdown_pct / Math.max(0.0001, risk.limits.max_drawdown_pct)
-                    : 0
+                  risk.usage.drawdown_pct != null && risk.limits.max_drawdown_pct
+                    ? risk.usage.drawdown_pct / risk.limits.max_drawdown_pct
+                    : null
                 }
                 stickyBadge={risk.limits.sticky_drawdown_halt}
                 source={risk.source_files.state}
@@ -572,9 +600,11 @@ export const AgentDetailView: React.FC<{
                 <span className="text-[#8b9bb4]">Ponte / localhost_only</span>
                 <span className="font-mono text-[#e6edf3]">
                   {agent.bridge.applicable
-                    ? `${agent.bridge.listen?.binds.join(', ') || 'sem escuta'} · ${
-                        agent.bridge.listen?.localhost_only ? 'localhost only' : 'ALERTA'
-                      }`
+                    ? agent.bridge.listen
+                      ? `${agent.bridge.listen.binds.join(', ') || 'sem escuta'} · ${
+                          agent.bridge.listen.localhost_only ? 'localhost only' : 'ALERTA'
+                        }`
+                      : (agent.bridge.note ?? 'sem dado de /api/v2/infra')
                     : 'Sem ponte MT5'}
                 </span>
               </div>
@@ -587,23 +617,29 @@ export const AgentDetailView: React.FC<{
                 Configuração efetiva (somente leitura)
               </h2>
               <span className="font-mono text-[11px] text-[#8b9bb4]">
-                {strategyConfig.config_path}
+                {strategyConfig?.config_path ?? `configs/${agentId}.yaml`}
               </span>
             </div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-              <div className="text-[#8b9bb4]">Estratégia</div>
-              <div className="font-mono text-[#e6edf3]">{strategyConfig.strategy_name}</div>
-              <div className="text-[#8b9bb4]">Símbolos ({effectiveIsLive ? 'live' : 'pesquisa'})</div>
-              <div className="font-mono text-[#e6edf3]">
-                {(effectiveIsLive ? strategyConfig.symbols_live : strategyConfig.symbols_research).join(', ')}
+            {!strategyConfig ? (
+              <p className="text-xs text-[#8b9bb4]">
+                Configuração indisponível em /api/v2/config/{agentId}.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                <div className="text-[#8b9bb4]">Estratégia</div>
+                <div className="font-mono text-[#e6edf3]">{strategyConfig.strategy_name || '—'}</div>
+                <div className="text-[#8b9bb4]">Símbolos ({effectiveIsLive ? 'live' : 'pesquisa'})</div>
+                <div className="font-mono text-[#e6edf3]">
+                  {(effectiveIsLive ? strategyConfig.symbols_live : strategyConfig.symbols_research).join(', ') || '—'}
+                </div>
+                <div className="text-[#8b9bb4]">Modo de símbolo</div>
+                <div className="font-mono text-[#e6edf3]">{strategyConfig.symbol_mode || '—'}</div>
+                <div className="text-[#8b9bb4]">Chaves .env (apenas nomes)</div>
+                <div className="font-mono text-[#8b9bb4] truncate">
+                  {strategyConfig.env_key_names_only.join(', ') || '—'}
+                </div>
               </div>
-              <div className="text-[#8b9bb4]">Modo de símbolo</div>
-              <div className="font-mono text-[#e6edf3]">{strategyConfig.symbol_mode}</div>
-              <div className="text-[#8b9bb4]">Chaves .env (apenas nomes)</div>
-              <div className="font-mono text-[#8b9bb4] truncate">
-                {strategyConfig.env_key_names_only.join(', ')}
-              </div>
-            </div>
+            )}
           </div>
         </section>
       </div>
@@ -686,53 +722,38 @@ export const AgentDetailView: React.FC<{
               Controles do agente {agent.label}
             </h2>
           </div>
-          <span className="text-xs text-[#8b9bb4]">
-            {role === 'owner'
-              ? effectiveIsLive
-                ? 'Modo REAL: exige confirmação digitada + checkbox + OTP 2FA'
-                : 'Modo PAPEL: exige confirmação digitada + auditoria'
-              : 'Somente papel owner pode acionar controles'}
+          <span className="text-xs text-[#8b9bb4] max-w-xl">
+            {READONLY_CONTROL_NOTE}
+            {offline ? ' Sem conexão com o VPS.' : ''}
           </span>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            disabled={offline || role !== 'owner'}
-            onClick={() => onTriggerDanger('flatten', agent)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[#f85149] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#f85149]/90 disabled:opacity-45 disabled:cursor-not-allowed"
+            disabled
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#f85149] px-3.5 py-2 text-xs font-semibold text-white opacity-45 cursor-not-allowed"
           >
             <OctagonX className="h-3.5 w-3.5" /> Zerar (Flatten)
           </button>
-
           <button
             type="button"
-            disabled={offline || role !== 'owner'}
-            onClick={() => onTriggerDanger('kill', agent)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#f85149]/60 bg-[#f85149]/15 px-3.5 py-2 text-xs font-semibold text-[#f85149] hover:bg-[#f85149]/25 disabled:opacity-45 disabled:cursor-not-allowed"
+            disabled
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#f85149]/60 bg-[#f85149]/15 px-3.5 py-2 text-xs font-semibold text-[#f85149] opacity-45 cursor-not-allowed"
           >
             Matar (KILL)
           </button>
-
           <button
             type="button"
-            disabled={offline || role !== 'owner' || !agent.kill.blocked}
-            onClick={() => onTriggerDanger('kill_clear', agent)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#21262d] px-3.5 py-2 text-xs font-medium text-[#e6edf3] hover:bg-[#30363d] disabled:opacity-45 disabled:cursor-not-allowed"
+            disabled
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#21262d] px-3.5 py-2 text-xs font-medium text-[#e6edf3] opacity-45 cursor-not-allowed"
           >
             Limpar KILL
           </button>
-
           <button
             type="button"
-            disabled={offline || role !== 'owner'}
-            onClick={() =>
-              onTriggerDanger(
-                agent.units.agent.active === 'active' ? 'unit_stop' : 'unit_start',
-                agent
-              )
-            }
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#21262d] px-3.5 py-2 text-xs font-medium text-[#e6edf3] hover:bg-[#30363d] disabled:opacity-45 disabled:cursor-not-allowed"
+            disabled
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#21262d] px-3.5 py-2 text-xs font-medium text-[#e6edf3] opacity-45 cursor-not-allowed"
           >
             {agent.units.agent.active === 'active' ? (
               <>
@@ -744,17 +765,10 @@ export const AgentDetailView: React.FC<{
               </>
             )}
           </button>
-
-          {/* In crypto with sticky halt, reset-halt is explicitly de-emphasized (secondary) */}
           <button
             type="button"
-            disabled={offline || role !== 'owner' || !agent.state?.halted}
-            onClick={() => onTriggerDanger('reset_halt', agent)}
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-medium disabled:opacity-45 disabled:cursor-not-allowed ${
-              agentId === 'crypto'
-                ? 'border-[#30363d] bg-[#0d1117] text-[#8b9bb4] hover:text-[#e6edf3]'
-                : 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922] hover:bg-[#d29922]/25'
-            }`}
+            disabled
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] px-3.5 py-2 text-xs font-medium text-[#8b9bb4] opacity-45 cursor-not-allowed"
           >
             <RotateCcw className="h-3.5 w-3.5" /> Resetar halt
           </button>

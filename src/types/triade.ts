@@ -67,19 +67,19 @@ export interface PositionDict {
 
 export interface ExportState {
   path?: string;
-  day: string;
-  equity_peak: number;
-  day_start_equity: number;
-  day_peak_equity?: number;
-  cash?: number;
-  equity_current?: number;
-  realized_pnl_today: number;
-  trades_today: number;
+  day: string | null;
+  equity_peak: number | null;
+  day_start_equity: number | null;
+  day_peak_equity?: number | null;
+  cash?: number | null;
+  equity_current?: number | null;
+  realized_pnl_today: number | null;
+  trades_today: number | null;
   halted: boolean;
   sticky_halt: boolean;
   halt_reason: string | null;
   block_entries: boolean;
-  consecutive_losses?: number;
+  consecutive_losses?: number | null;
   trades_by_source?: Record<string, number>;
   pnl_by_source?: Record<string, number>;
   source_halted?: Record<string, string | null>;
@@ -168,7 +168,7 @@ export interface AgentSummary {
   log_file?: string;
   signals?: Array<{ ts: string; symbol: string; side?: string; reason?: string; source?: string }>;
   logs?: LogEntry[];
-  session_phase?: 'accepting_entries' | 'manage_only' | 'flatten_window' | 'outside_session';
+  session_phase?: 'accepting_entries' | 'manage_only' | 'flatten_window' | 'outside_session' | null;
   no_new_trades_after?: string | null;
   flatten_time?: string | null;
 }
@@ -180,6 +180,11 @@ export interface HealthResponse {
   uptime_seconds?: number;
   version?: string;
   auth_required?: boolean;
+  server_time?: string;
+  timezone?: string;
+  /** Present only on the local contract stub used for screenshots. */
+  stub?: boolean;
+  note?: string;
 }
 
 export interface StatusResponse {
@@ -270,7 +275,8 @@ export interface TimelineResponse {
   after: string | null;
   window: 'start' | 'latest' | 'all';
   count: number;
-  total_matched: number;
+  /** Null when the server does not report a total beyond this page. */
+  total_matched: number | null;
   truncated: boolean;
   sources: TimelineSourceInfo[];
   missing: Array<{ agent: AgentId; path: string; reason: string }>;
@@ -300,29 +306,31 @@ export interface RiskResponse {
   session: {
     no_new_trades_after: string | null;
     flatten_time: string | null;
-    phase: 'accepting_entries' | 'manage_only' | 'flatten_window' | 'outside_session';
+    phase: 'accepting_entries' | 'manage_only' | 'flatten_window' | 'outside_session' | null;
   };
   limits: {
     symbols: string[];
     max_qty: Record<string, number>;
-    max_open_positions: number;
-    max_trades_per_day: number;
+    max_open_positions: number | null;
+    max_trades_per_day: number | null;
     daily_loss_limit: number | null;
     daily_loss_limit_pct: number | null;
-    max_consecutive_losses: number;
-    max_drawdown_pct: number;
+    max_consecutive_losses: number | null;
+    max_drawdown_pct: number | null;
     sticky_drawdown_halt: boolean;
     max_trades_per_source: Record<string, number>;
-    stop_required: boolean;
-    emergency_stop_pct: number;
-    one_trade_per_day: boolean;
+    /** Null when the YAML has no key. Live code may still require a stop. */
+    stop_required: boolean | null;
+    flatten_on_halt: boolean | null;
+    emergency_stop_pct: number | null;
+    one_trade_per_day: boolean | null;
   };
   usage: {
-    trades_today: number;
-    consecutive_losses: number;
+    trades_today: number | null;
+    consecutive_losses: number | null;
     consecutive_losses_assumed?: boolean;
-    open_positions: number;
-    open_qty: number;
+    open_positions: number | null;
+    open_qty: number | null;
     day_loss: number | null;
     day_loss_pct_of_limit: number | null;
     drawdown_pct: number | null;
@@ -333,6 +341,9 @@ export interface RiskResponse {
     block_entries: boolean;
     kill_blocked: boolean;
   };
+  state_exists?: boolean;
+  equity_current?: number | null;
+  day?: string | null;
   recent_rejects: TimelineEvent[];
   source_files: {
     config: string;
@@ -342,23 +353,23 @@ export interface RiskResponse {
 }
 
 export interface BacktestMetricsBlock {
-  trades: number;
-  wins: number;
-  losses: number;
-  win_rate: number;
-  profit_factor: number;
-  max_drawdown: number;
-  max_drawdown_pct: number;
-  sharpe: number;
-  expectancy: number;
-  net_pnl: number;
-  fees: number;
-  avg_win: number;
-  avg_loss: number;
-  initial_equity: number;
-  ending_equity: number;
+  trades: number | null;
+  wins: number | null;
+  losses: number | null;
+  win_rate: number | null;
+  profit_factor: number | null;
+  max_drawdown: number | null;
+  max_drawdown_pct: number | null;
+  sharpe: number | null;
+  expectancy: number | null;
+  net_pnl: number | null;
+  fees: number | null;
+  avg_win: number | null;
+  avg_loss: number | null;
+  initial_equity: number | null;
+  ending_equity: number | null;
   currency: CurrencyCode;
-  days: number;
+  days: number | null;
   halted: boolean;
   halt_reason: string | null;
 }
@@ -376,12 +387,12 @@ export interface BacktestReport {
     source: string;
     start: string;
     end: string;
-    bars: number;
+    bars: number | null;
     disclaimer: string;
   };
-  amostra_cheia: BacktestMetricsBlock;
-  dentro_da_amostra: BacktestMetricsBlock;
-  fora_da_amostra: BacktestMetricsBlock;
+  amostra_cheia: BacktestMetricsBlock | null;
+  dentro_da_amostra: BacktestMetricsBlock | null;
+  fora_da_amostra: BacktestMetricsBlock | null;
   amostra_cheia_por_ativo?: Record<string, BacktestMetricsBlock>;
   live_warning?: string;
 }
@@ -401,8 +412,8 @@ export interface StrategyConfig {
   research_params: Record<string, string | number | boolean>;
   micro_live_params: Record<string, string | number | boolean>;
   costs: {
-    fee_per_unit_side: number;
-    slippage_ticks: number;
+    fee_per_unit_side: number | null;
+    slippage_ticks: number | null;
   };
   llm_editable_bounds: Array<{
     key: string;
@@ -423,18 +434,18 @@ export interface InfraResponse {
     version: string;
     commit_hash: string;
     branch: string;
-    linger: 'no' | 'yes';
+    linger: 'no' | 'yes' | 'unknown';
   };
   server_clock_utc: string;
   server_clock_brt: string;
   disk_var: {
     path: string;
-    used_mb: number;
-    total_mb: number;
-    used_pct: number;
-    inode_pct: number;
-    journal_largest_file: string;
-    journal_largest_mb: number;
+    used_mb: number | null;
+    total_mb: number | null;
+    used_pct: number | null;
+    inode_pct: number | null;
+    journal_largest_file: string | null;
+    journal_largest_mb: number | null;
   };
   units: Array<{
     agent: AgentId | 'dashboard';
@@ -466,7 +477,7 @@ export interface AlertItem {
   id: string;
   ts: string;
   agent: AgentId | 'infra';
-  mode: 'live' | 'paper' | 'infra';
+  mode: 'live' | 'paper' | 'infra' | 'unknown';
   severity: 'critical' | 'warning' | 'info';
   origin: string;
   title: string;
@@ -567,6 +578,59 @@ export interface RecentBarsResponse {
   source_file: string;
   exists: boolean;
   bars: OhlcvBar[];
+  /** Set when the snapshot timeframe does not match the request (no resample). */
+  note?: string | null;
+  updated_at?: string | null;
+}
+
+export interface LogsPayload {
+  ok: boolean;
+  agent: AgentId;
+  mode: 'live' | 'paper';
+  mode_requested: string;
+  path: string | null;
+  exists: boolean;
+  entries: LogEntry[];
+  systemd_journal: string[];
+}
+
+export interface PnlPoint {
+  ts: string;
+  symbol?: string;
+  source?: string;
+  trade_pnl: number | null;
+  fees: number | null;
+  cumulative_pnl: number | null;
+}
+
+export interface PnlResponse {
+  ok: boolean;
+  agent: AgentId;
+  mode: 'live' | 'paper';
+  currency: CurrencyCode;
+  count: number;
+  incomplete: boolean;
+  summary: {
+    net_pnl: number | null;
+    fees: number | null;
+    wins: number | null;
+    losses: number | null;
+    win_rate: number | null;
+    expectancy: number | null;
+  };
+  series: PnlPoint[];
+  note: string | null;
+}
+
+export interface AuditPayload {
+  entries: AuditEntry[];
+  exists: boolean;
+  note: string | null;
+}
+
+export interface AlertsPayload {
+  alerts: AlertItem[];
+  note: string | null;
 }
 
 export interface DrawingAnchor {

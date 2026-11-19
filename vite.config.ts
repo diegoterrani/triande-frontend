@@ -6,6 +6,8 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // Served by the dashboard at http://127.0.0.1:8765/app. Use VITE_BASE=/ for local preview.
+    base: process.env.VITE_BASE || '/app/',
     plugins: [
       react(),
       tailwindcss(),

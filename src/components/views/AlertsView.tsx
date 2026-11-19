@@ -1,14 +1,17 @@
 import React from 'react';
 import { Bell, Check } from 'lucide-react';
-import { AlertItem } from '../../types/triade';
+import { AgentId, AlertItem } from '../../types/triade';
 import { AGENT_NAMES, formatBrasiliaTime } from '../../utils/format';
 import { EmptyState, ModeBadge, StatusBadge } from '../ui/Primitives';
 
 export const AlertsView: React.FC<{
   alerts: AlertItem[];
-  telegramEnabled: boolean;
+  note: string | null;
+  telegramFlags: Record<AgentId, boolean | null>;
   onAcknowledge: (id: string) => void;
-}> = ({ alerts, telegramEnabled, onAcknowledge }) => {
+}> = ({ alerts, note, telegramFlags, onAcknowledge }) => {
+  const telegramKnown = Object.values(telegramFlags).some((flag) => flag !== null);
+  const telegramOn = Object.values(telegramFlags).some((flag) => flag === true);
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -22,13 +25,19 @@ export const AlertsView: React.FC<{
 
         <div className="flex items-center gap-2 rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs">
           <Bell className="h-3.5 w-3.5 text-[#8b9bb4]" />
-          <span className="text-[#8b9bb4]">TelegramNotifier:</span>
+          <span className="text-[#8b9bb4]">Telegram (flag do YAML, sem toggle):</span>
           <StatusBadge
-            variant={telegramEnabled ? 'ok' : 'neutral'}
-            label={telegramEnabled ? 'ligado' : 'desligado'}
+            variant={telegramOn ? 'ok' : 'neutral'}
+            label={telegramKnown ? (telegramOn ? 'ligado em algum agente' : 'desligado') : 'não informado'}
           />
         </div>
       </div>
+
+      {note && (
+        <p className="text-xs text-[#8b9bb4] rounded-xl border border-[#30363d] bg-[#161b22] px-4 py-2.5">
+          {note} Esconder um alerta vale só neste navegador.
+        </p>
+      )}
 
       {alerts.length === 0 ? (
         <EmptyState
@@ -83,7 +92,7 @@ export const AlertsView: React.FC<{
                 <div className="shrink-0">
                   {al.acknowledged ? (
                     <span className="inline-flex items-center gap-1 text-xs text-[#3fb950] font-medium">
-                      <Check className="h-3.5 w-3.5" /> Visto
+                      <Check className="h-3.5 w-3.5" /> Escondido aqui
                     </span>
                   ) : (
                     <button
@@ -91,7 +100,7 @@ export const AlertsView: React.FC<{
                       onClick={() => onAcknowledge(al.id)}
                       className="rounded-lg border border-[#30363d] bg-[#21262d] px-3 py-1.5 text-xs font-medium text-[#e6edf3] hover:bg-[#30363d]"
                     >
-                      Marcar como visto
+                      Esconder aqui
                     </button>
                   )}
                 </div>

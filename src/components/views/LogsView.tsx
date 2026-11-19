@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
+import { LiveRevisionContext } from '../../api/liveContext';
 import { triadeApi } from '../../api/triade';
-import { AgentId, LogEntry } from '../../types/triade';
+import { AgentId, LogEntry, LogsPayload } from '../../types/triade';
 import { AGENT_NAMES, formatBrasiliaTime, redactSecrets } from '../../utils/format';
-import { EmptyState, StatusBadge } from '../ui/Primitives';
+import { EmptyState, ErrorState, StatusBadge } from '../ui/Primitives';
 
 export const LogsView: React.FC = () => {
   const [agent, setAgent] = useState<AgentId>('b3');
@@ -12,14 +13,32 @@ export const LogsView: React.FC = () => {
   const [query, setQuery] = useState('');
   const [opLogs, setOpLogs] = useState<LogEntry[]>([]);
   const [sysLogs, setSysLogs] = useState<string[]>([]);
+  const [meta, setMeta] = useState<LogsPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const revision = useContext(LiveRevisionContext);
 
   useEffect(() => {
+    let cancel = false;
     triadeApi
       .getLogs(agent, logMode)
-      .then(setOpLogs)
-      .catch(() => setOpLogs([]));
-    setSysLogs(triadeApi.getSystemJournal(agent));
-  }, [agent, logMode]);
+      .then((payload) => {
+        if (cancel) return;
+        setOpLogs(payload.entries);
+        setSysLogs(payload.systemd_journal);
+        setMeta(payload);
+        setError(null);
+      })
+      .catch((err) => {
+        if (cancel) return;
+        setOpLogs([]);
+        setSysLogs([]);
+        setMeta(null);
+        setError(err instanceof Error ? err.message : 'Falha ao carregar logs');
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [agent, logMode, revision]);
 
   const filteredOp = useMemo(() => {
     return opLogs.filter((l) => {
@@ -127,7 +146,14 @@ export const LogsView: React.FC = () => {
         </div>
 
         <StatusBadge variant="info" label="SECRET_RE ativo" />
+        {meta?.path && (
+          <span className="font-mono text-[11px] text-[#8b9bb4]">
+            {meta.path} · existe: {String(meta.exists)} · modo {meta.mode}
+          </span>
+        )}
       </div>
+
+      {error && <ErrorState message={error} />}
 
       {/* Output */}
       {layer === 'operational' ? (
@@ -159,13 +185,20 @@ export const LogsView: React.FC = () => {
           </div>
         )
       ) : (
-        <div className="rounded-xl border border-[#30363d] bg-[#0b0f14] p-4 font-mono text-xs space-y-1.5 overflow-x-auto">
-          {filteredSys.map((line, i) => (
-            <div key={i} className="text-[#e6edf3] whitespace-pre-wrap">
-              {line}
-            </div>
-          ))}
-        </div>
+        filteredSys.length === 0 ? (
+          <EmptyState
+            title="Sem journal systemd neste payload"
+            detail="O campo systemd_journal de GET /api/v2/logs vem vazio para este agente. Não há journal local de mentira."
+          />
+        ) : (
+          <div className="rounded-xl border border-[#30363d] bg-[#0b0f14] p-4 font-mono text-xs space-y-1.5 overflow-x-auto">
+            {filteredSys.map((line, i) => (
+              <div key={i} className="text-[#e6edf3] whitespace-pre-wrap">
+                {line}
+              </div>
+            ))}
+          </div>
+        )
       )}
     </div>
   );
