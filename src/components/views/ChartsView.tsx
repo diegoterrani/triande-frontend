@@ -176,6 +176,7 @@ export const ChartsView: React.FC<{
           bars={barsData.bars}
           sourceFile={barsData.source_file}
           exists={barsData.exists}
+          emptyDetail={barsData.note}
           timelineEvents={timelineEvents}
           openPositions={openPositions}
           onInspectOrderId={(clientOrderId) =>

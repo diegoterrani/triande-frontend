@@ -66,15 +66,23 @@ export const InfraView: React.FC<{
         <div className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4">
           <MetricBlock
             label="Disco /opt/triade/var"
-            value={`${infra.disk_var.used_mb} MB (${infra.disk_var.used_pct}%)`}
-            subtext={`inode ${infra.disk_var.inode_pct}% · maior: ${infra.disk_var.journal_largest_file} (${infra.disk_var.journal_largest_mb} MB)`}
+            value={
+              infra.disk_var.used_mb == null
+                ? '—'
+                : `${infra.disk_var.used_mb} MB (${infra.disk_var.used_pct ?? '—'}%)`
+            }
+            subtext={`inode ${infra.disk_var.inode_pct ?? '—'}% · maior: ${infra.disk_var.journal_largest_file ?? '—'} (${infra.disk_var.journal_largest_mb ?? '—'} MB)`}
           />
         </div>
         <div className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4">
           <MetricBlock
             label="Relógio do servidor (Brasília)"
-            value={infra.server_clock_brt}
-            subtext={`UTC: ${infra.server_clock_utc.slice(11, 19)}Z`}
+            value={infra.server_clock_brt || '—'}
+            subtext={
+              infra.server_clock_utc
+                ? `UTC: ${infra.server_clock_utc.slice(11, 19)}Z`
+                : 'UTC: —'
+            }
           />
         </div>
       </div>

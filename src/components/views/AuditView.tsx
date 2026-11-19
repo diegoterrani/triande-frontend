@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { AgentId, AuditEntry, UserRole } from '../../types/triade';
+import { AgentId, AuditEntry } from '../../types/triade';
 import { formatBrasiliaTime } from '../../utils/format';
 import { EmptyState, ModeBadge, StatusBadge } from '../ui/Primitives';
 
 export const AuditView: React.FC<{
   entries: AuditEntry[];
-  role: UserRole;
-}> = ({ entries, role }) => {
+  note: string | null;
+}> = ({ entries, note }) => {
   const [agentFilter, setAgentFilter] = useState<AgentId | 'all'>('all');
   const [actionFilter, setActionFilter] = useState<string>('all');
 
@@ -17,15 +17,6 @@ export const AuditView: React.FC<{
       return true;
     });
   }, [entries, agentFilter, actionFilter]);
-
-  if (role !== 'owner' && role !== 'auditor') {
-    return (
-      <EmptyState
-        title="Acesso restrito à Auditoria"
-        detail="A trilha de auditoria append-only (var/dashboard/audit.jsonl) é visível apenas para os papéis owner e auditor."
-      />
-    );
-  }
 
   return (
     <div className="space-y-5">
@@ -68,10 +59,20 @@ export const AuditView: React.FC<{
         </div>
       </div>
 
+      {note && (
+        <p className="text-xs text-[#8b9bb4] rounded-xl border border-[#30363d] bg-[#161b22] px-4 py-2.5">
+          {note}
+        </p>
+      )}
+
       {filtered.length === 0 ? (
         <EmptyState
-          title="Nenhum registro de auditoria neste filtro"
-          detail="Toda ação executada em Controles gera uma linha imutável aqui."
+          title="Nenhum registro de auditoria"
+          detail={
+            note ??
+            'var/dashboard/audit.jsonl ainda não existe. Este backend não tem endpoints de escrita.'
+          }
+          missingPath="var/dashboard/audit.jsonl"
         />
       ) : (
         <div className="rounded-xl border border-[#30363d] bg-[#1c2330] overflow-hidden">

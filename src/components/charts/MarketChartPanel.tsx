@@ -87,6 +87,7 @@ export const MarketChartPanel: React.FC<{
   bars: OhlcvBar[];
   sourceFile: string;
   exists: boolean;
+  emptyDetail?: string | null;
   timelineEvents: TimelineEvent[];
   openPositions: PositionDict[];
   compact?: boolean;
@@ -99,6 +100,7 @@ export const MarketChartPanel: React.FC<{
   bars,
   sourceFile,
   exists,
+  emptyDetail,
   timelineEvents,
   openPositions,
   compact = false,
@@ -439,7 +441,10 @@ export const MarketChartPanel: React.FC<{
     return (
       <EmptyState
         title={`Sem barras OHLCV em ${sourceFile}`}
-        detail={`Ainda não há histórico de barras recentes para ${symbol} (${agent.toUpperCase()}). Quando o agente gravar ${sourceFile}, os candles, indicadores, ferramentas de desenho e marcações de trades serão exibidos aqui.`}
+        detail={
+          emptyDetail ||
+          `Ainda não há histórico de barras recentes para ${symbol} (${agent.toUpperCase()}). Quando o agente gravar ${sourceFile}, os candles aparecem aqui. Nada é inventado.`
+        }
         missingPath={sourceFile}
       />
     );

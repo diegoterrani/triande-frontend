@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
-  OctagonX,
   RefreshCw,
   Server,
   ShieldAlert,
@@ -16,7 +15,6 @@ import {
   RouteKey,
   StatusResponse,
   TimelineEvent,
-  UserRole,
 } from '../../types/triade';
 import {
   AGENT_NAMES,
@@ -47,12 +45,10 @@ export const OverviewView: React.FC<{
   loading: boolean;
   error: string | null;
   offline: boolean;
-  role: UserRole;
   followLive: boolean;
   onToggleFollow: () => void;
   onRetry: () => void;
   onNavigate: (route: RouteKey, query?: { agent?: AgentId }) => void;
-  onFlattenAgent: (agent: AgentSummary) => void;
 }> = ({
   status,
   infra,
@@ -60,13 +56,10 @@ export const OverviewView: React.FC<{
   alerts,
   loading,
   error,
-  offline,
-  role,
   followLive,
   onToggleFollow,
   onRetry,
   onNavigate,
-  onFlattenAgent,
 }) => {
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
 
@@ -82,11 +75,6 @@ export const OverviewView: React.FC<{
 
   const openAlerts = alerts.filter((a) => !a.acknowledged);
   const compactTimeline = timelineEvents.slice(0, 15);
-
-  const getMaxTradesForAgent = (id: AgentId, live: boolean) => {
-    if (id === 'b3') return live ? 5 : 6;
-    return 4;
-  };
 
   return (
     <div className="space-y-6">
@@ -167,9 +155,8 @@ export const OverviewView: React.FC<{
           {agents.map((ag) => {
             const st = ag.state;
             const unitActive = ag.units.agent.active === 'active';
-            const bridgeMissing = ag.bridge.applicable && ag.live_enabled && !ag.bridge.check?.pong;
+            const listening = ag.bridge.listen?.listening;
             const pnl = st?.realized_pnl_today;
-            const maxTrades = getMaxTradesForAgent(ag.agent, ag.live_enabled);
             const openPosCount = st?.positions.length ?? 0;
 
             return (
@@ -281,11 +268,11 @@ export const OverviewView: React.FC<{
                         />
                         <MetricBlock
                           label="Trades / Posições"
-                          value={`${st.trades_today} / ${maxTrades} · ${openPosCount}/1`}
+                          value={`${st.trades_today ?? '—'} trades · ${openPosCount} pos.`}
                           subtext={
-                            st.consecutive_losses !== undefined
+                            st.consecutive_losses != null
                               ? `${st.consecutive_losses} perda(s) seguida(s)`
-                              : undefined
+                              : 'perdas seguidas não informadas'
                           }
                         />
                       </div>
@@ -337,11 +324,23 @@ export const OverviewView: React.FC<{
                     ) : (
                       <div className="flex items-center gap-2 font-mono">
                         <StatusBadge
-                          variant={ag.bridge.check?.pong ? 'ok' : bridgeMissing ? 'bad' : 'neutral'}
+                          variant={
+                            listening === true
+                              ? ag.bridge.listen?.localhost_only === false
+                                ? 'bad'
+                                : 'ok'
+                              : listening === false
+                                ? 'bad'
+                                : 'neutral'
+                          }
                           label={
-                            ag.bridge.check?.pong
-                              ? `ok :${ag.bridge.listen?.port}`
-                              : `indisponível :${ag.bridge.listen?.port}`
+                            listening === true
+                              ? `escutando :${ag.bridge.listen?.port}${
+                                  ag.bridge.check?.pong === false ? ' · pong ocupado' : ''
+                                }`
+                              : listening === false
+                                ? `sem escuta :${ag.bridge.listen?.port ?? '?'}`
+                                : 'sem dado de porta'
                           }
                         />
                         {ag.bridge.secondary_ports && ag.agent === 'b3' && (
@@ -402,17 +401,12 @@ export const OverviewView: React.FC<{
                     </button>
                   </div>
 
-                  {role === 'owner' && (
-                    <button
-                      type="button"
-                      disabled={offline}
-                      onClick={() => onFlattenAgent(ag)}
-                      className="inline-flex items-center gap-1 rounded-md border border-[#f85149]/50 bg-[#f85149]/10 px-2.5 py-1 text-xs font-semibold text-[#f85149] hover:bg-[#f85149]/20 disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
-                    >
-                      <OctagonX className="h-3.5 w-3.5" />
-                      Zerar
-                    </button>
-                  )}
+                  <span
+                    className="text-[11px] text-[#8b9bb4]"
+                    title="POST flatten responde 405. Nada é enviado."
+                  >
+                    Zerar indisponível
+                  </span>
                 </div>
               </article>
             );
@@ -518,10 +512,14 @@ export const OverviewView: React.FC<{
                       </span>
                       <span
                         className={`font-mono text-[10px] font-semibold uppercase shrink-0 ${
-                          ev.mode === 'live' ? 'text-[#f85149]' : 'text-[#58a6ff]'
+                          ev.mode === 'live'
+                            ? 'text-[#f85149]'
+                            : ev.mode === 'paper'
+                              ? 'text-[#58a6ff]'
+                              : 'text-[#8b9bb4]'
                         }`}
                       >
-                        {ev.mode === 'live' ? 'REAL' : 'PAPEL'}
+                        {ev.mode === 'live' ? 'REAL' : ev.mode === 'paper' ? 'PAPEL' : 'sem modo'}
                       </span>
                       <span className="font-medium text-[#e6edf3] shrink-0">
                         {EVENT_LABELS[ev.event] ?? ev.event}
@@ -581,18 +579,16 @@ export const OverviewView: React.FC<{
             )}
           </div>
 
-          {role === 'owner' && (
-            <div className="border-t border-[#30363d] bg-[#161b22] px-4 py-2.5 flex items-center justify-between">
-              <span className="text-[11px] text-[#8b9bb4]">Controles auditados</span>
-              <button
-                type="button"
-                onClick={() => onNavigate('controls')}
-                className="inline-flex items-center gap-1 text-xs font-medium text-[#e6edf3] hover:text-[#7aa2f7]"
-              >
-                <ShieldAlert className="h-3.5 w-3.5" /> Abrir controles
-              </button>
-            </div>
-          )}
+          <div className="border-t border-[#30363d] bg-[#161b22] px-4 py-2.5 flex items-center justify-between">
+            <span className="text-[11px] text-[#8b9bb4]">Controles somente leitura (405)</span>
+            <button
+              type="button"
+              onClick={() => onNavigate('controls')}
+              className="inline-flex items-center gap-1 text-xs font-medium text-[#e6edf3] hover:text-[#7aa2f7]"
+            >
+              <ShieldAlert className="h-3.5 w-3.5" /> Ver controles
+            </button>
+          </div>
         </section>
       </div>
     </div>

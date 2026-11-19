@@ -13,7 +13,6 @@ import {
   History,
   Layers,
   LayoutDashboard,
-  Lock,
   Menu,
   OctagonX,
   Search,
@@ -22,14 +21,12 @@ import {
   ShieldAlert,
   Sliders,
   Terminal,
-  UserCheck,
   X,
 } from 'lucide-react';
 import {
   AgentId,
   AgentSummary,
   ConnectionState,
-  PreviewScenario,
   RouteKey,
   StatusResponse,
   TimelineEvent,
@@ -109,11 +106,8 @@ export const AppShell: React.FC<{
   role: UserRole;
   operatorName: string;
   tunnelEnv: string;
-  isRemoteVps: boolean;
-  previewScenario: PreviewScenario;
-  onChangeScenario: (s: PreviewScenario) => void;
+  stub: boolean;
   onOpenKillAll: () => void;
-  onLockSession: () => void;
   recentEvents: TimelineEvent[];
   unackedAlertsCount: number;
   toasts: ToastMessage[];
@@ -127,11 +121,8 @@ export const AppShell: React.FC<{
   role,
   operatorName,
   tunnelEnv,
-  isRemoteVps,
-  previewScenario,
-  onChangeScenario,
+  stub,
   onOpenKillAll,
-  onLockSession,
   recentEvents,
   unackedAlertsCount,
   toasts,
@@ -235,24 +226,22 @@ export const AppShell: React.FC<{
   return (
     <div className="min-h-screen flex flex-col bg-[#0d1117] text-[#e6edf3]">
       {/* Global Mode Banner */}
+      {stub && (
+        <div className="bg-[#d29922]/20 border-b border-[#d29922]/50 px-4 py-1.5 text-xs font-semibold text-[#d29922]">
+          STUB LOCAL — estes números vêm do contrato de exemplo, não da VPS.
+        </div>
+      )}
       {offline ? (
         <div
           role="alert"
-          className="bg-[#f85149]/15 border-b border-[#f85149]/50 px-4 py-1.5 text-xs font-medium text-[#f85149] flex flex-wrap items-center justify-between gap-2"
+          className="bg-[#f85149]/15 border-b border-[#f85149]/50 px-4 py-1.5 text-xs font-medium text-[#f85149]"
         >
-          <span>
-            FAIL-CLOSED: Sem conexão com o VPS ({status?.bind ?? '127.0.0.1:8765'}). Controles de
-            escrita desabilitados até restabelecer o túnel.
-          </span>
-          {!isRemoteVps && (
-            <button
-              type="button"
-              onClick={() => onChangeScenario('default_inspection')}
-              className="rounded border border-[#f85149]/50 bg-[#0d1117] px-2 py-0.5 text-[11px] font-semibold text-[#e6edf3] hover:bg-[#1c2330]"
-            >
-              Restaurar cenário de preview
-            </button>
-          )}
+          FAIL-CLOSED: sem conexão com o painel ({status?.bind || '127.0.0.1:8765'}). O túnel SSH
+          pode estar caído. Controles de escrita permanecem desabilitados.
+        </div>
+      ) : !status ? (
+        <div className="border-b border-[#30363d] bg-[#161b22] px-4 py-1.5 text-xs text-[#8b9bb4]">
+          Carregando status dos agentes…
         </div>
       ) : (
         <div
@@ -272,30 +261,16 @@ export const AppShell: React.FC<{
             </span>
             <span className="truncate">
               {anyLive
-                ? 'Há agente em modo REAL (conta real B3 · WINZ26 · stop obrigatório).'
-                : 'Todos os agentes em modo PAPEL (simulação / sem capital real em risco).'}
+                ? `Há agente em modo REAL (${agentsList
+                    .filter((ag) => ag.live_enabled)
+                    .map((ag) =>
+                      ag.contract_current ? `${ag.label} · ${ag.contract_current}` : ag.label
+                    )
+                    .join(', ')}). Conta real — nenhum comando de escrita sai deste painel.`
+                : 'Todos os agentes em modo PAPEL.'}
             </span>
           </div>
-
-          <div className="flex items-center gap-3 text-[11px] text-[#8b9bb4]">
-            {!isRemoteVps && (
-              <label className="flex items-center gap-1.5">
-                <span className="hidden sm:inline">Preview spec:</span>
-                <select
-                  aria-label="Selecionar cenário de preview da especificação"
-                  value={previewScenario}
-                  onChange={(e) => onChangeScenario(e.target.value as PreviewScenario)}
-                  className="rounded border border-[#30363d] bg-[#0d1117] px-2 py-0.5 text-[11px] text-[#e6edf3]"
-                >
-                  <option value="default_inspection">Inspeção VPS (B3 REAL · NASDAQ vazio · Cripto halted)</option>
-                  <option value="b3_live_with_position">B3 REAL com 1 WINZ26 aberto</option>
-                  <option value="all_paper">Todos em PAPEL</option>
-                  <option value="api_offline">Simular API Offline (Fail-Closed)</option>
-                </select>
-              </label>
-            )}
-            <span className="hidden md:inline font-mono">{tunnelEnv}</span>
-          </div>
+          <span className="hidden md:inline font-mono text-[11px] text-[#8b9bb4]">{tunnelEnv}</span>
         </div>
       )}
 
@@ -375,20 +350,9 @@ export const AppShell: React.FC<{
           </nav>
 
           <div className="border-t border-[#30363d] p-3 hidden xl:block">
-            <div className="flex items-center justify-between text-xs">
-              <div className="min-w-0">
-                <div className="font-medium text-[#e6edf3] truncate">{operatorName}</div>
-                <div className="text-[11px] text-[#8b9bb4] font-mono">papel: {role}</div>
-              </div>
-              <button
-                type="button"
-                onClick={onLockSession}
-                title="Bloquear painel / trocar operador"
-                aria-label="Bloquear sessão ou sair"
-                className="rounded-lg border border-[#30363d] bg-[#0d1117] p-1.5 text-[#8b9bb4] hover:text-[#e6edf3] hover:bg-[#21262d]"
-              >
-                <Lock className="h-3.5 w-3.5" />
-              </button>
+            <div className="text-xs min-w-0">
+              <div className="font-medium text-[#e6edf3] truncate">{operatorName}</div>
+              <div className="text-[11px] text-[#8b9bb4] font-mono">auth_required: false · {role}</div>
             </div>
           </div>
         </aside>
@@ -475,26 +439,17 @@ export const AppShell: React.FC<{
                 </kbd>
               </button>
 
-              {/* Separated Panic Button — owner only */}
-              {role === 'owner' && (
-                <button
-                  type="button"
-                  disabled={offline}
-                  onClick={onOpenKillAll}
-                  aria-label="Pânico global: matar todos os agentes"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#f85149] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#f85149]/90 disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
-                >
-                  <OctagonX className="h-3.5 w-3.5" />
-                  <span>Kill all</span>
-                </button>
-              )}
-
-              {role !== 'owner' && (
-                <span className="inline-flex items-center gap-1 rounded-lg border border-[#30363d] bg-[#161b22] px-2.5 py-1 text-[11px] text-[#8b9bb4]">
-                  <UserCheck className="h-3.5 w-3.5" />
-                  {role}
-                </span>
-              )}
+              <button
+                type="button"
+                disabled
+                onClick={onOpenKillAll}
+                aria-label="Kill all indisponível: backend somente leitura"
+                title="Somente leitura: POST /api/v2/kill-all responde 405. Nada é enviado."
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#f85149]/40 px-3 py-1.5 text-xs font-semibold text-white opacity-45 cursor-not-allowed whitespace-nowrap shrink-0"
+              >
+                <OctagonX className="h-3.5 w-3.5" />
+                <span>Kill all</span>
+              </button>
             </div>
           </header>
 
@@ -580,20 +535,8 @@ export const AppShell: React.FC<{
                 );
               })}
             </div>
-            <div className="border-t border-[#30363d] p-3 flex items-center justify-between text-xs">
-              <span className="text-[#8b9bb4]">
-                {operatorName} ({role})
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setMobileDrawerOpen(false);
-                  onLockSession();
-                }}
-                className="rounded border border-[#30363d] px-2.5 py-1 text-xs text-[#e6edf3]"
-              >
-                Bloquear
-              </button>
+            <div className="border-t border-[#30363d] p-3 text-xs text-[#8b9bb4]">
+              {operatorName} · sem autenticação ({role})
             </div>
           </div>
         </div>

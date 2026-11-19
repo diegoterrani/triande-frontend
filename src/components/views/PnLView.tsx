@@ -1,99 +1,140 @@
-import React, { useMemo, useState } from 'react';
-import {
-  AgentId,
-  CurrencyCode,
-  StatusResponse,
-  TimelineEvent,
-} from '../../types/triade';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
+import { LiveRevisionContext } from '../../api/liveContext';
+import { triadeApi } from '../../api/triade';
+import { AgentId, PnlResponse, StatusResponse } from '../../types/triade';
 import {
   AGENT_CURRENCIES,
   AGENT_NAMES,
   formatMoney,
   formatPct,
+  todayInSaoPaulo,
 } from '../../utils/format';
 import {
   EmptyState,
+  ErrorState,
   MetricBlock,
   ModeBadge,
   PnLBarChart,
   PnLLineChart,
 } from '../ui/Primitives';
 
+function inPeriod(ts: string, period: 'today' | '7d' | '30d'): boolean {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return false;
+  if (period === 'today') {
+    const day = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+    return day === todayInSaoPaulo();
+  }
+  const days = period === '7d' ? 7 : 30;
+  return Date.now() - date.getTime() <= days * 86_400_000;
+}
+
 export const PnLView: React.FC<{
   status: StatusResponse | null;
-  timelineEvents: TimelineEvent[];
-}> = ({ status, timelineEvents }) => {
+}> = ({ status }) => {
   const [selectedScope, setSelectedScope] = useState<'side_by_side' | AgentId>('side_by_side');
-  const [seriesMode, setSeriesMode] = useState<'live' | 'paper'>('paper');
+  const [seriesMode, setSeriesMode] = useState<'live' | 'paper'>('live');
   const [period, setPeriod] = useState<'today' | '7d' | '30d'>('today');
+  const [payloads, setPayloads] = useState<Partial<Record<AgentId, PnlResponse>>>({});
+  const [error, setError] = useState<string | null>(null);
+  const revision = useContext(LiveRevisionContext);
 
-  const computeStats = (agent: AgentId, mode: 'live' | 'paper') => {
-    const trades = timelineEvents
-      .filter((e) => e.event === 'trade' && e.agent === agent && e.mode === mode)
-      .sort((a, b) => a.ts.localeCompare(b.ts));
+  useEffect(() => {
+    let cancel = false;
+    const ids: AgentId[] =
+      selectedScope === 'side_by_side' ? ['b3', 'nasdaq', 'crypto'] : [selectedScope];
+    Promise.all(ids.map((id) => triadeApi.getPnl(id, { mode: seriesMode, limit: 1000 })))
+      .then((rows) => {
+        if (cancel) return;
+        setPayloads((prev) => {
+          const next = { ...prev };
+          ids.forEach((id, index) => {
+            next[id] = rows[index];
+          });
+          return next;
+        });
+        setError(null);
+      })
+      .catch((err) => {
+        if (!cancel) setError(err instanceof Error ? err.message : 'Falha ao carregar PnL');
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [selectedScope, seriesMode, revision]);
 
-    const currency: CurrencyCode = AGENT_CURRENCIES[agent];
-    const totalPnl = trades.reduce((acc, t) => acc + (t.pnl ?? 0), 0);
-    const totalFees = trades.reduce((acc, t) => acc + (t.fees ?? 0), 0);
-    const wins = trades.filter((t) => (t.pnl ?? 0) > 0);
-    const losses = trades.filter((t) => (t.pnl ?? 0) < 0);
-    const winRate = trades.length > 0 ? wins.length / trades.length : 0;
-    const expectancy = trades.length > 0 ? totalPnl / trades.length : 0;
-    const maxWin = wins.length > 0 ? Math.max(...wins.map((t) => t.pnl ?? 0)) : 0;
-    const maxLoss = losses.length > 0 ? Math.min(...losses.map((t) => t.pnl ?? 0)) : 0;
-
-    let cum = 0;
+  const computeStats = (agent: AgentId) => {
+    const payload = payloads[agent];
+    const points = (payload?.series ?? []).filter((point) => inPeriod(point.ts, period));
+    const currency = payload?.currency ?? AGENT_CURRENCIES[agent];
+    const known = points.filter((point) => point.trade_pnl != null);
+    const totalPnl = known.reduce((acc, point) => acc + (point.trade_pnl as number), 0);
+    const feePoints = points.filter((point) => point.fees != null);
+    const totalFees = feePoints.reduce((acc, point) => acc + (point.fees as number), 0);
+    const wins = known.filter((point) => (point.trade_pnl ?? 0) > 0);
+    const losses = known.filter((point) => (point.trade_pnl ?? 0) < 0);
+    const winRate = known.length > 0 ? wins.length / known.length : null;
+    const expectancy = known.length > 0 ? totalPnl / known.length : null;
+    const maxWin = wins.length > 0 ? Math.max(...wins.map((point) => point.trade_pnl ?? 0)) : null;
+    const maxLoss = losses.length > 0 ? Math.min(...losses.map((point) => point.trade_pnl ?? 0)) : null;
     let peak = 0;
     let maxRealizedDd = 0;
-    const curvePoints = trades.map((t) => {
-      cum += t.pnl ?? 0;
-      if (cum > peak) peak = cum;
-      const dd = peak - cum;
-      if (dd > maxRealizedDd) maxRealizedDd = dd;
-      return {
-        ts: t.ts,
-        cumulative: cum,
-        symbol: t.symbol,
-        pnl: t.pnl ?? 0,
-      };
-    });
-
+    const curvePoints = points
+      .filter((point) => point.cumulative_pnl != null)
+      .map((point) => {
+        const cumulative = point.cumulative_pnl ?? 0;
+        if (cumulative > peak) peak = cumulative;
+        const dd = peak - cumulative;
+        if (dd > maxRealizedDd) maxRealizedDd = dd;
+        return {
+          ts: point.ts,
+          cumulative,
+          symbol: point.symbol,
+          pnl: point.trade_pnl,
+        };
+      });
     const bySource: Record<string, { pnl: number; count: number }> = {};
     const bySymbol: Record<string, { pnl: number; count: number }> = {};
-    for (const t of trades) {
-      const src = t.source ?? 'desconhecido';
+    for (const point of known) {
+      const src = point.source ?? 'desconhecido';
       bySource[src] = bySource[src] ?? { pnl: 0, count: 0 };
-      bySource[src].pnl += t.pnl ?? 0;
+      bySource[src].pnl += point.trade_pnl ?? 0;
       bySource[src].count += 1;
-
-      const sym = t.symbol ?? '—';
+      const sym = point.symbol ?? '—';
       bySymbol[sym] = bySymbol[sym] ?? { pnl: 0, count: 0 };
-      bySymbol[sym].pnl += t.pnl ?? 0;
+      bySymbol[sym].pnl += point.trade_pnl ?? 0;
       bySymbol[sym].count += 1;
     }
-
     return {
       currency,
-      trades,
-      totalPnl,
-      totalFees,
+      trades: points,
+      totalPnl: known.length ? totalPnl : null,
+      totalFees: feePoints.length ? totalFees : null,
       wins: wins.length,
       losses: losses.length,
       winRate,
       expectancy,
       maxWin,
       maxLoss,
-      maxRealizedDd,
+      maxRealizedDd: points.length ? maxRealizedDd : null,
       curvePoints,
       bySource,
       bySymbol,
+      note: payload?.note ?? null,
+      incomplete: payload?.incomplete ?? false,
+      summary: payload?.summary ?? null,
     };
   };
 
   const singleStats = useMemo(() => {
     if (selectedScope === 'side_by_side') return null;
-    return computeStats(selectedScope, seriesMode);
-  }, [selectedScope, seriesMode, timelineEvents]);
+    return computeStats(selectedScope);
+  }, [selectedScope, payloads, period]);
 
   return (
     <div className="space-y-6">
@@ -101,8 +142,8 @@ export const PnLView: React.FC<{
         <div>
           <h1 className="text-[22px] font-semibold text-[#e6edf3]">PnL e performance</h1>
           <p className="text-xs text-[#8b9bb4] mt-0.5">
-            Séries live e paper sempre separadas · moedas distintas (BRL, USD, USDT) nunca são
-            somadas em um único total
+            Séries live e paper sempre separadas, a partir de /api/v2/agents/&#123;id&#125;/pnl.
+            Moedas distintas nunca são somadas. Não há curva intra-diária de equity persistida.
           </p>
         </div>
 
@@ -169,10 +210,12 @@ export const PnLView: React.FC<{
         </div>
       </div>
 
+      {error && <ErrorState message={error} />}
+
       {selectedScope === 'side_by_side' ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {(['b3', 'nasdaq', 'crypto'] as AgentId[]).map((id) => {
-            const st = computeStats(id, seriesMode);
+            const st = computeStats(id);
             return (
               <div
                 key={id}
@@ -203,7 +246,7 @@ export const PnLView: React.FC<{
                       <MetricBlock
                         label="PnL realizado"
                         value={formatMoney(st.totalPnl, st.currency, true)}
-                        tone={st.totalPnl >= 0 ? 'good' : 'bad'}
+                        tone={st.totalPnl == null ? 'default' : st.totalPnl > 0 ? 'good' : st.totalPnl < 0 ? 'bad' : 'default'}
                       />
                       <MetricBlock
                         label="Taxas"
@@ -240,7 +283,15 @@ export const PnLView: React.FC<{
                 <MetricBlock
                   label="PnL realizado"
                   value={formatMoney(singleStats.totalPnl, singleStats.currency, true)}
-                  tone={singleStats.totalPnl >= 0 ? 'good' : 'bad'}
+                  tone={
+                    singleStats.totalPnl == null
+                      ? 'default'
+                      : singleStats.totalPnl > 0
+                        ? 'good'
+                        : singleStats.totalPnl < 0
+                          ? 'bad'
+                          : 'default'
+                  }
                   large
                 />
               </div>
@@ -284,11 +335,13 @@ export const PnLView: React.FC<{
                   Resultado por trade
                 </h2>
                 <PnLBarChart
-                  items={singleStats.trades.map((t, i) => ({
-                    label: `#${i + 1} ${t.symbol ?? ''}`,
-                    ts: t.ts,
-                    pnl: t.pnl ?? 0,
-                  }))}
+                  items={singleStats.trades
+                    .filter((t) => t.trade_pnl != null)
+                    .map((t, i) => ({
+                      label: `#${i + 1} ${t.symbol ?? ''}`,
+                      ts: t.ts,
+                      pnl: t.trade_pnl as number,
+                    }))}
                   currency={singleStats.currency}
                 />
               </div>

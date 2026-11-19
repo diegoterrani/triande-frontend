@@ -1,5 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Radio } from 'lucide-react';
+import { LiveRevisionContext } from '../../api/liveContext';
+import { triadeApi } from '../../api/triade';
 import {
   AgentId,
   AnalystEvent,
@@ -17,7 +19,7 @@ import {
   summarizeTimelineEvent,
   todayInSaoPaulo,
 } from '../../utils/format';
-import { EmptyState, ModeBadge, StatusBadge } from '../ui/Primitives';
+import { EmptyState, ErrorState, ModeBadge, StatusBadge } from '../ui/Primitives';
 
 const EVENT_TYPE_OPTIONS = [
   'signal',
@@ -62,6 +64,42 @@ export const TimelineView: React.FC<{
   const [limit, setLimit] = useState<number>(200);
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
   const [activeTab, setActiveTab] = useState<'journal' | 'analyst'>('journal');
+  const [remote, setRemote] = useState<TimelineResponse | null>(null);
+  const [tlError, setTlError] = useState<string | null>(null);
+  const [tlLoading, setTlLoading] = useState(false);
+  const revision = useContext(LiveRevisionContext);
+  const shown = remote ?? timelineData;
+
+  useEffect(() => {
+    let cancel = false;
+    setTlLoading(true);
+    const event = selectedEventTypes.length === 1 ? selectedEventTypes[0] : undefined;
+    triadeApi
+      .getTimeline({
+        agent,
+        mode: modeFilter,
+        since: dateFilter || undefined,
+        until: dateFilter || undefined,
+        limit,
+        event,
+        source: sourceFilter === 'all' ? undefined : sourceFilter,
+      })
+      .then((payload) => {
+        if (cancel) return;
+        setRemote(payload);
+        setTlError(null);
+      })
+      .catch((err) => {
+        if (cancel) return;
+        setTlError(err instanceof Error ? err.message : 'Falha ao carregar /api/v2/timeline');
+      })
+      .finally(() => {
+        if (!cancel) setTlLoading(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [agent, modeFilter, dateFilter, limit, selectedEventTypes, sourceFilter, followLive, revision]);
 
   const toggleEventType = (ev: string) => {
     setSelectedEventTypes((prev) =>
@@ -70,7 +108,7 @@ export const TimelineView: React.FC<{
   };
 
   const filteredEvents = useMemo(() => {
-    const base = timelineData?.events ?? [];
+    const base = shown?.events ?? [];
     return base
       .filter((ev) => {
         if (agent !== 'all' && ev.agent !== agent) return false;
@@ -98,7 +136,7 @@ export const TimelineView: React.FC<{
       })
       .slice(0, limit);
   }, [
-    timelineData,
+    shown,
     agent,
     modeFilter,
     sourceFilter,
@@ -148,9 +186,11 @@ export const TimelineView: React.FC<{
         <div>
           <h1 className="text-[22px] font-semibold text-[#e6edf3]">Linha do tempo de decisões</h1>
           <p className="text-xs text-[#8b9bb4] mt-0.5">
-            Passo a passo gravado nos journals (America/Sao_Paulo · horário de Brasília)
+            GET /api/v2/timeline · America/Sao_Paulo{tlLoading ? ' · carregando…' : ''}
           </p>
         </div>
+
+        {tlError && <ErrorState message={tlError} />}
 
         <div className="flex items-center gap-2">
           <div className="inline-flex rounded-lg border border-[#30363d] bg-[#161b22] p-0.5 text-xs">
@@ -327,22 +367,22 @@ export const TimelineView: React.FC<{
       </section>
 
       {/* Response Metadata */}
-      {timelineData && (
+      {shown && (
         <div className="rounded-xl border border-[#30363d] bg-[#161b22] px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-3 font-mono text-[#8b9bb4]">
             <span>
               exibindo <strong className="text-[#e6edf3]">{filteredEvents.length}</strong> de{' '}
-              <strong className="text-[#e6edf3]">{timelineData.total_matched}</strong>
+              <strong className="text-[#e6edf3]">{shown.total_matched ?? '—'}</strong>
             </span>
-            <span>window: {timelineData.window}</span>
-            <span>truncated: {String(timelineData.truncated)}</span>
+            <span>window: {shown.window}</span>
+            <span>truncated: {String(shown.truncated)}</span>
             <span>
-              fontes: {timelineData.sources.map((s) => s.path).join(', ') || 'nenhuma'}
+              fontes: {shown.sources.map((s) => s.path).join(', ') || 'nenhuma'}
             </span>
           </div>
-          {timelineData.missing.length > 0 && (
+          {shown.missing.length > 0 && (
             <div className="text-[11px] text-[#d29922] font-mono">
-              missing: {timelineData.missing.map((m) => `${m.agent} (${m.path})`).join('; ')}
+              missing: {shown.missing.map((m) => `${m.agent} (${m.path})`).join('; ')}
             </div>
           )}
         </div>
@@ -394,8 +434,8 @@ export const TimelineView: React.FC<{
         <EmptyState
           title="Nenhum evento neste filtro"
           detail={
-            timelineData?.missing.length
-              ? `Sem eventos correspondentes. Ausentes no servidor: ${timelineData.missing
+            shown?.missing.length
+              ? `Sem eventos correspondentes. Ausentes no servidor: ${shown.missing
                   .map((m) => m.path)
                   .join(', ')}`
               : 'Ajuste os filtros de agente, evento ou client_order_id.'
@@ -452,7 +492,11 @@ export const TimelineView: React.FC<{
                       <span className="text-xs font-semibold text-[#e6edf3]">
                         {AGENT_NAMES[ev.agent]}
                       </span>
-                      <ModeBadge live={ev.mode === 'live'} compact />
+                      {ev.mode === 'unknown' ? (
+                        <StatusBadge variant="neutral" label="sem modo" />
+                      ) : (
+                        <ModeBadge live={ev.mode === 'live'} compact />
+                      )}
                       <span className="text-xs font-semibold text-[#e6edf3]">
                         {EVENT_LABELS[ev.event] ?? ev.event}
                       </span>

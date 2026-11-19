@@ -8,22 +8,14 @@ import {
   Square,
   Terminal,
 } from 'lucide-react';
-import {
-  AgentId,
-  AgentSummary,
-  DangerActionType,
-  StatusResponse,
-  UserRole,
-} from '../../types/triade';
+import { READONLY_CONTROL_NOTE } from '../../api/readonly';
+import { AgentSummary, StatusResponse } from '../../types/triade';
 import { ErrorState, ModeBadge, StatusBadge } from '../ui/Primitives';
 
 export const ControlsView: React.FC<{
   status: StatusResponse | null;
-  role: UserRole;
   offline: boolean;
-  onTriggerDanger: (action: DangerActionType, target: AgentSummary | 'all') => void;
-}> = ({ status, role, offline, onTriggerDanger }) => {
-  const isOwner = role === 'owner';
+}> = ({ status, offline }) => {
   const agents: AgentSummary[] = status
     ? [status.agents.b3, status.agents.nasdaq, status.agents.crypto]
     : [];
@@ -41,28 +33,23 @@ export const ControlsView: React.FC<{
           </p>
         </div>
 
-        {isOwner && (
-          <button
-            type="button"
-            disabled={offline}
-            onClick={() => onTriggerDanger('kill_all', 'all')}
-            className="inline-flex items-center gap-2 rounded-lg bg-[#f85149] px-4 py-2 text-xs font-semibold text-white hover:bg-[#f85149]/90 disabled:opacity-45 disabled:cursor-not-allowed"
-          >
-            <OctagonX className="h-4 w-4" />
-            PÂNICO GLOBAL — Matar todos (KILL_ALL)
-          </button>
-        )}
+        <button
+          type="button"
+          disabled
+          className="inline-flex items-center gap-2 rounded-lg bg-[#f85149] px-4 py-2 text-xs font-semibold text-white opacity-45 cursor-not-allowed"
+        >
+          <OctagonX className="h-4 w-4" />
+          PÂNICO GLOBAL — Matar todos (indisponível)
+        </button>
+      </div>
+
+      <div className="rounded-xl border border-[#d29922]/50 bg-[#d29922]/10 px-4 py-3 text-xs text-[#d29922]">
+        {READONLY_CONTROL_NOTE}
+        {offline ? ' Sem conexão com o VPS, o painel continua fail-closed.' : ''}
       </div>
 
       {offline && (
         <ErrorState message="Modo fail-closed: sem conexão com o VPS. Todos os controles estão desabilitados." />
-      )}
-
-      {!isOwner && (
-        <div className="rounded-xl border border-[#d29922]/50 bg-[#d29922]/10 px-4 py-3 text-xs text-[#d29922]">
-          Seu papel atual é <strong>{role}</strong>. Controles destrutivos e de execução exigem o
-          papel <strong>owner</strong> autenticado.
-        </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -101,8 +88,8 @@ export const ControlsView: React.FC<{
             <div className="space-y-2 pt-2 border-t border-[#30363d]">
               <button
                 type="button"
-                disabled={offline || !isOwner}
-                onClick={() => onTriggerDanger('flatten', ag)}
+                disabled
+                title={READONLY_CONTROL_NOTE}
                 className="w-full flex items-center justify-between rounded-lg bg-[#f85149] px-3 py-2 text-xs font-semibold text-white hover:bg-[#f85149]/90 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <span>Zerar agente (flatten + KILL)</span>
@@ -111,8 +98,8 @@ export const ControlsView: React.FC<{
 
               <button
                 type="button"
-                disabled={offline || !isOwner}
-                onClick={() => onTriggerDanger('kill', ag)}
+                disabled
+                title={READONLY_CONTROL_NOTE}
                 className="w-full flex items-center justify-between rounded-lg border border-[#f85149]/60 bg-[#f85149]/15 px-3 py-2 text-xs font-semibold text-[#f85149] hover:bg-[#f85149]/25 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <span>Matar agente (var/{ag.agent}/KILL)</span>
@@ -121,8 +108,8 @@ export const ControlsView: React.FC<{
 
               <button
                 type="button"
-                disabled={offline || !isOwner || !ag.kill.blocked}
-                onClick={() => onTriggerDanger('kill_clear', ag)}
+                disabled
+                title={READONLY_CONTROL_NOTE}
                 className="w-full flex items-center justify-between rounded-lg border border-[#30363d] bg-[#21262d] px-3 py-2 text-xs font-medium text-[#e6edf3] hover:bg-[#30363d] disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <span>Liberar kill (KillSwitch.clear)</span>
@@ -131,13 +118,8 @@ export const ControlsView: React.FC<{
 
               <button
                 type="button"
-                disabled={offline || !isOwner}
-                onClick={() =>
-                  onTriggerDanger(
-                    ag.units.agent.active === 'active' ? 'unit_stop' : 'unit_start',
-                    ag
-                  )
-                }
+                disabled
+                title={READONLY_CONTROL_NOTE}
                 className="w-full flex items-center justify-between rounded-lg border border-[#30363d] bg-[#21262d] px-3 py-2 text-xs font-medium text-[#e6edf3] hover:bg-[#30363d] disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <span>
@@ -154,8 +136,8 @@ export const ControlsView: React.FC<{
 
               <button
                 type="button"
-                disabled={offline || !isOwner || !ag.state?.halted}
-                onClick={() => onTriggerDanger('reset_halt', ag)}
+                disabled
+                title={READONLY_CONTROL_NOTE}
                 className={`w-full flex items-center justify-between rounded-lg border px-3 py-2 text-xs font-medium disabled:opacity-45 disabled:cursor-not-allowed ${
                   ag.agent === 'crypto'
                     ? 'border-[#30363d] bg-[#0d1117] text-[#8b9bb4]'

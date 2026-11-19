@@ -4,13 +4,12 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { triadeApi } from './api/triade';
+import { annotateAlertModes, triadeApi } from './api/triade';
+import { LiveRevisionContext } from './api/liveContext';
 import { AppShell, ToastMessage } from './components/layout/AppShell';
-import { ConfirmDangerModal } from './components/ui/Primitives';
 import { AgentDetailView } from './components/views/AgentDetailView';
 import { AlertsView } from './components/views/AlertsView';
 import { AuditView } from './components/views/AuditView';
-import { AuthLockView } from './components/views/AuthLockView';
 import { BacktestsView } from './components/views/BacktestsView';
 import { ChartsView } from './components/views/ChartsView';
 import { ControlsView } from './components/views/ControlsView';
@@ -24,24 +23,20 @@ import { SettingsView } from './components/views/SettingsView';
 import { StrategiesView } from './components/views/StrategiesView';
 import { TimelineView } from './components/views/TimelineView';
 import { TradesView } from './components/views/TradesView';
-import { STRATEGY_CONFIGS } from './data/specPreviewData';
 import {
   AgentId,
-  AgentSummary,
   AlertItem,
+  AlertsPayload,
   AnalystEvent,
   AuditEntry,
   BacktestReport,
   ConnectionState,
-  DangerActionPayload,
-  DangerActionType,
+  HealthResponse,
   InfraResponse,
-  PreviewScenario,
   RouteKey,
   StatusResponse,
   StrategyConfig,
   TimelineResponse,
-  UserRole,
 } from './types/triade';
 
 function parseRouteFromLocation(): {
@@ -50,7 +45,11 @@ function parseRouteFromLocation(): {
   clientOrderId?: string;
 } {
   const hash = window.location.hash.replace(/^#/, '');
-  const path = window.location.pathname.replace(/^\/+/, '');
+  const base = (import.meta.env.BASE_URL || '/').replace(/^\/+|\/+$/g, '');
+  let path = window.location.pathname.replace(/^\/+/, '');
+  if (base && (path === base || path.startsWith(`${base}/`))) {
+    path = path.slice(base.length).replace(/^\/+/, '');
+  }
   const raw = hash || path;
   const [segment, qs] = raw.split('?');
   const params = new URLSearchParams(qs || window.location.search);
@@ -86,6 +85,8 @@ function parseRouteFromLocation(): {
   };
 }
 
+const EMPTY_FLAGS: Record<AgentId, boolean | null> = { b3: null, nasdaq: null, crypto: null };
+
 export default function App() {
   const initialParsed = parseRouteFromLocation();
   const [route, setRoute] = useState<RouteKey>(initialParsed.route);
@@ -94,41 +95,43 @@ export default function App() {
     initialParsed.clientOrderId
   );
 
-  // Auth state: required immediately if pointing to a remote VPS without token
-  const [locked, setLocked] = useState<boolean>(
-    () => triadeApi.isUsingRemoteVps() && !triadeApi.hasToken()
+  const [tunnelEnv, setTunnelEnv] = useState<string>(
+    triadeApi.isCrossOrigin()
+      ? `túnel · ${triadeApi.getConfig().apiBase}`
+      : 'mesma origem · /api/v2'
   );
-  const [role, setRole] = useState<UserRole>('owner');
-  const [operatorName, setOperatorName] = useState<string>('Diego Terrani');
-  const [tunnelEnv, setTunnelEnv] = useState<string>('local · 127.0.0.1:8765');
 
-  const [previewScenario, setPreviewScenario] = useState<PreviewScenario>(() =>
-    triadeApi.getPreviewScenario()
-  );
-  const [connection, setConnection] = useState<ConnectionState>('sse');
+  useEffect(() => {
+    const sync = () => {
+      const parsed = parseRouteFromLocation();
+      setRoute(parsed.route);
+      setRouteAgentParam(parsed.agent);
+      setRouteClientOrderId(parsed.clientOrderId);
+    };
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+  const [connection, setConnection] = useState<ConnectionState>('reconnecting');
   const [followLive, setFollowLive] = useState<boolean>(true);
+  const [revision, setRevision] = useState(0);
+  const [streamEpoch, setStreamEpoch] = useState(0);
 
+  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [timelineData, setTimelineData] = useState<TimelineResponse | null>(null);
   const [analystEvents, setAnalystEvents] = useState<AnalystEvent[]>([]);
   const [infra, setInfra] = useState<InfraResponse | null>(null);
-  const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [infraError, setInfraError] = useState<string | null>(null);
+  const [alertsPayload, setAlertsPayload] = useState<AlertsPayload>({ alerts: [], note: null });
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [auditNote, setAuditNote] = useState<string | null>(null);
   const [backtests, setBacktests] = useState<BacktestReport[]>([]);
-  const [strategies, setStrategies] = useState<Record<AgentId, StrategyConfig>>(STRATEGY_CONFIGS);
-  const [telegramEnabled, setTelegramEnabled] = useState<boolean>(() =>
-    triadeApi.getTelegramEnabled()
-  );
+  const [strategies, setStrategies] = useState<Partial<Record<AgentId, StrategyConfig>>>({});
+  const [telegramFlags, setTelegramFlags] = useState<Record<AgentId, boolean | null>>(EMPTY_FLAGS);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-
-  const [dangerModal, setDangerModal] = useState<{
-    open: boolean;
-    action: DangerActionType;
-    target: AgentSummary | 'all';
-  } | null>(null);
 
   const pushToast = useCallback((t: Omit<ToastMessage, 'id'>) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -141,25 +144,34 @@ export default function App() {
   const fetchAll = useCallback(async () => {
     try {
       setError(null);
-      const [st, tl, ae, inf, al, au, bt, strats] = await Promise.all([
-        triadeApi.getStatus(),
-        triadeApi.getTimeline({ limit: 200 }),
-        triadeApi.getAnalystEvents(),
-        triadeApi.getInfra(),
-        triadeApi.getAlerts(),
-        triadeApi.getAudit(),
-        triadeApi.getBacktests(),
-        triadeApi.getStrategies(),
-      ]);
-      setStatus(st);
-      setTimelineData(tl);
-      setAnalystEvents(ae);
-      setInfra(inf);
-      setAlerts(al);
-      setAuditEntries(au);
-      setBacktests(bt);
-      setStrategies(strats);
-      setConnection((prev) => (prev === 'offline' ? 'sse' : prev));
+      const [healthResult, statusPack, timeline, analyst, alerts, audit, reports, configs, flags] =
+        await Promise.all([
+          triadeApi.getHealth().catch(() => null),
+          triadeApi.getStatusWithInfra(),
+          triadeApi.getTimeline({ agent: 'all', mode: 'all', limit: 200 }).catch(() => null),
+          triadeApi.getAnalystEvents('all').catch(() => null),
+          triadeApi.getAlerts().catch(() => null),
+          triadeApi.getAudit().catch(() => null),
+          triadeApi.getBacktests().catch(() => null),
+          triadeApi.getStrategies().catch(() => null),
+          triadeApi.getTelegramFlags().catch(() => null),
+        ]);
+      setHealth(healthResult);
+      setStatus(statusPack.status);
+      setInfra(statusPack.infra);
+      setInfraError(statusPack.infraError);
+      if (timeline) setTimelineData(timeline);
+      if (analyst) setAnalystEvents(analyst);
+      if (alerts) setAlertsPayload(annotateAlertModes(alerts, statusPack.status));
+      if (audit) {
+        setAuditEntries(audit.entries);
+        setAuditNote(audit.note);
+      }
+      if (reports) setBacktests(reports);
+      if (configs) setStrategies(configs);
+      if (flags) setTelegramFlags(flags);
+      setConnection((prev) => (prev === 'sse' ? 'sse' : 'polling'));
+      setRevision((n) => n + 1);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Sem conexão com o VPS';
       setError(msg);
@@ -170,14 +182,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (locked) return;
     fetchAll();
-  }, [fetchAll, locked]);
+  }, [fetchAll]);
 
   useEffect(() => {
-    if (locked || !followLive) return;
+    if (!followLive) return;
     const unsub = triadeApi.subscribeStream({
-      onConnectionChange: (c) => setConnection(c),
+      onConnectionChange: (next) => setConnection(next),
       onJournalEvent: () => {
         fetchAll();
       },
@@ -186,7 +197,7 @@ export default function App() {
       },
     });
     return unsub;
-  }, [locked, followLive, fetchAll]);
+  }, [followLive, fetchAll, streamEpoch]);
 
   const handleNavigate = useCallback(
     (nextRoute: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => {
@@ -224,240 +235,141 @@ export default function App() {
     []
   );
 
-  const handleChangeScenario = (next: PreviewScenario) => {
-    triadeApi.setPreviewScenario(next);
-    setPreviewScenario(next);
-    if (next === 'api_offline') {
-      setConnection('offline');
-      setError('sem conexão com o VPS (127.0.0.1:8765 indisponível)');
-    } else {
-      setConnection('sse');
-      fetchAll();
-    }
-  };
-
-  const handleConfirmDanger = async (payload: DangerActionPayload) => {
-    const res = await triadeApi.executeDangerAction(payload, {
-      name: operatorName,
-      role,
-    });
-    if (!res.ok) {
-      throw new Error(res.error || 'Comando rejeitado pelo servidor');
-    }
-    pushToast({
-      tone: 'warn',
-      title: `Comando executado: ${res.action} (${res.agent})`,
-      detail: `Auditoria ${res.audit_id}${res.kill_flag ? ` · flag ${res.kill_flag}` : ''}`,
-    });
-    await fetchAll();
-  };
-
-  if (locked) {
-    return (
-      <AuthLockView
-        isRemoteVps={triadeApi.isUsingRemoteVps()}
-        initialApiBase={triadeApi.getConfig().apiBase}
-        onUnlock={({ name, role: nextRole, token, apiBase }) => {
-          if (apiBase !== undefined || token !== undefined) {
-            triadeApi.setConnection(apiBase ?? triadeApi.getConfig().apiBase, token ?? '');
-          }
-          setOperatorName(name);
-          setRole(nextRole);
-          setLocked(false);
-        }}
-      />
-    );
-  }
-
-  const allAgentsList: AgentSummary[] = status
-    ? [status.agents.b3, status.agents.nasdaq, status.agents.crypto]
-    : [];
-
   const offline = connection === 'offline';
+  const alerts: AlertItem[] = alertsPayload.alerts;
   const unackedAlertsCount = alerts.filter((a) => !a.acknowledged).length;
+  const apiBaseLabel = triadeApi.getConfig().apiBase || 'mesma origem';
 
   return (
-    <AppShell
-      route={route}
-      onNavigate={handleNavigate}
-      status={status}
-      connection={connection}
-      role={role}
-      operatorName={operatorName}
-      tunnelEnv={tunnelEnv}
-      isRemoteVps={triadeApi.isUsingRemoteVps()}
-      previewScenario={previewScenario}
-      onChangeScenario={handleChangeScenario}
-      onOpenKillAll={() =>
-        setDangerModal({ open: true, action: 'kill_all', target: 'all' })
-      }
-      onLockSession={() => setLocked(true)}
-      recentEvents={timelineData?.events ?? []}
-      unackedAlertsCount={unackedAlertsCount}
-      toasts={toasts}
-      onDismissToast={(id) =>
-        setToasts((prev) => prev.filter((item) => item.id !== id))
-      }
-    >
-      {route === 'overview' && (
-        <OverviewView
-          status={status}
-          infra={infra}
-          timelineEvents={timelineData?.events ?? []}
-          alerts={alerts}
-          loading={loading}
-          error={error}
-          offline={offline}
-          role={role}
-          followLive={followLive}
-          onToggleFollow={() => setFollowLive((f) => !f)}
-          onRetry={fetchAll}
-          onNavigate={handleNavigate}
-          onFlattenAgent={(ag) =>
-            setDangerModal({ open: true, action: 'flatten', target: ag })
-          }
-        />
-      )}
+    <LiveRevisionContext.Provider value={revision}>
+      <AppShell
+        route={route}
+        onNavigate={handleNavigate}
+        status={status}
+        connection={connection}
+        role="auditor"
+        operatorName="Sem autenticação"
+        tunnelEnv={tunnelEnv}
+        stub={health?.stub === true}
+        onOpenKillAll={() => undefined}
+        recentEvents={timelineData?.events ?? []}
+        unackedAlertsCount={unackedAlertsCount}
+        toasts={toasts}
+        onDismissToast={(id) => setToasts((prev) => prev.filter((item) => item.id !== id))}
+      >
+        {route === 'overview' && (
+          <OverviewView
+            status={status}
+            infra={infra}
+            timelineEvents={timelineData?.events ?? []}
+            alerts={alerts}
+            loading={loading}
+            error={error}
+            offline={offline}
+            followLive={followLive}
+            onToggleFollow={() => setFollowLive((f) => !f)}
+            onRetry={fetchAll}
+            onNavigate={handleNavigate}
+          />
+        )}
 
-      {(route === 'agent-b3' || route === 'agent-nasdaq' || route === 'agent-crypto') && (
-        <AgentDetailView
-          agentId={route.replace('agent-', '') as AgentId}
-          agent={status?.agents[route.replace('agent-', '') as AgentId] ?? null}
-          timelineEvents={timelineData?.events ?? []}
-          analystEvents={analystEvents}
-          strategyConfig={strategies[route.replace('agent-', '') as AgentId]}
-          role={role}
-          offline={offline}
-          onNavigate={handleNavigate}
-          onTriggerDanger={(action, ag) =>
-            setDangerModal({ open: true, action, target: ag })
-          }
-        />
-      )}
+        {(route === 'agent-b3' || route === 'agent-nasdaq' || route === 'agent-crypto') && (
+          <AgentDetailView
+            agentId={route.replace('agent-', '') as AgentId}
+            agent={status?.agents[route.replace('agent-', '') as AgentId] ?? null}
+            timelineEvents={timelineData?.events ?? []}
+            analystEvents={analystEvents}
+            strategyConfig={strategies[route.replace('agent-', '') as AgentId] ?? null}
+            offline={offline}
+            onNavigate={handleNavigate}
+          />
+        )}
 
-      {route === 'timeline' && (
-        <TimelineView
-          key={`${routeAgentParam ?? 'all'}-${routeClientOrderId ?? ''}`}
-          timelineData={timelineData}
-          analystEvents={analystEvents}
-          initialAgent={routeAgentParam ?? 'all'}
-          initialClientOrderId={routeClientOrderId ?? ''}
-          followLive={followLive}
-          onToggleFollow={() => setFollowLive((f) => !f)}
-          onRefresh={fetchAll}
-        />
-      )}
+        {route === 'timeline' && (
+          <TimelineView
+            key={`${routeAgentParam ?? 'all'}-${routeClientOrderId ?? ''}`}
+            timelineData={timelineData}
+            analystEvents={analystEvents}
+            initialAgent={routeAgentParam ?? 'all'}
+            initialClientOrderId={routeClientOrderId ?? ''}
+            followLive={followLive}
+            onToggleFollow={() => setFollowLive((f) => !f)}
+            onRefresh={fetchAll}
+          />
+        )}
 
-      {route === 'positions' && (
-        <PositionsView
-          status={status}
-          timelineEvents={timelineData?.events ?? []}
-          role={role}
-          offline={offline}
-          onNavigate={handleNavigate}
-          onFlattenAgent={(ag) =>
-            setDangerModal({ open: true, action: 'flatten', target: ag })
-          }
-        />
-      )}
+        {route === 'positions' && (
+          <PositionsView
+            status={status}
+            timelineEvents={timelineData?.events ?? []}
+            offline={offline}
+            onNavigate={handleNavigate}
+          />
+        )}
 
-      {route === 'risk' && <RiskView initialAgent={routeAgentParam ?? 'b3'} />}
+        {route === 'risk' && <RiskView initialAgent={routeAgentParam ?? 'b3'} />}
 
-      {route === 'pnl' && (
-        <PnLView status={status} timelineEvents={timelineData?.events ?? []} />
-      )}
+        {route === 'pnl' && <PnLView status={status} />}
 
-      {route === 'charts' && (
-        <ChartsView
-          status={status}
-          timelineEvents={timelineData?.events ?? []}
-          initialAgent={routeAgentParam ?? 'b3'}
-          onNavigate={handleNavigate}
-        />
-      )}
+        {route === 'charts' && (
+          <ChartsView
+            status={status}
+            timelineEvents={timelineData?.events ?? []}
+            initialAgent={routeAgentParam ?? 'b3'}
+            onNavigate={handleNavigate}
+          />
+        )}
 
-      {route === 'trades' && (
-        <TradesView
-          timelineEvents={timelineData?.events ?? []}
-          onNavigate={handleNavigate}
-        />
-      )}
+        {route === 'trades' && <TradesView onNavigate={handleNavigate} />}
 
-      {route === 'backtests' && <BacktestsView reports={backtests} />}
+        {route === 'backtests' && <BacktestsView reports={backtests} />}
 
-      {route === 'strategies' && <StrategiesView configs={strategies} />}
+        {route === 'strategies' && <StrategiesView configs={strategies} />}
 
-      {route === 'infra' && (
-        <InfraView infra={infra} error={error} onRefresh={fetchAll} />
-      )}
+        {route === 'infra' && (
+          <InfraView infra={infra} error={error ?? infraError} onRefresh={fetchAll} />
+        )}
 
-      {route === 'alerts' && (
-        <AlertsView
-          alerts={alerts}
-          telegramEnabled={telegramEnabled}
-          onAcknowledge={(id) => {
-            setAlerts(triadeApi.ackAlert(id));
-            pushToast({ tone: 'info', title: 'Alerta marcado como visto' });
-          }}
-        />
-      )}
+        {route === 'alerts' && (
+          <AlertsView
+            alerts={alerts}
+            note={alertsPayload.note}
+            telegramFlags={telegramFlags}
+            onAcknowledge={(id) => {
+              setAlertsPayload((current) => triadeApi.ackAlertLocal(id, current));
+              pushToast({
+                tone: 'info',
+                title: 'Alerta escondido só neste navegador',
+                detail: 'O servidor não grava acknowledgement.',
+              });
+            }}
+          />
+        )}
 
-      {route === 'controls' && (
-        <ControlsView
-          status={status}
-          role={role}
-          offline={offline}
-          onTriggerDanger={(action, target) =>
-            setDangerModal({ open: true, action, target })
-          }
-        />
-      )}
+        {route === 'controls' && <ControlsView status={status} offline={offline} />}
 
-      {route === 'logs' && <LogsView />}
+        {route === 'logs' && <LogsView />}
 
-      {route === 'audit' && <AuditView entries={auditEntries} role={role} />}
+        {route === 'audit' && <AuditView entries={auditEntries} note={auditNote} />}
 
-      {route === 'settings' && (
-        <SettingsView
-          role={role}
-          operatorName={operatorName}
-          tunnelEnv={tunnelEnv}
-          followDefault={followLive}
-          telegramEnabled={telegramEnabled}
-          onChangeRole={(nextRole, nextName) => {
-            setRole(nextRole);
-            setOperatorName(nextName);
-            pushToast({
-              tone: 'info',
-              title: `Perfil alterado para ${nextName} (${nextRole})`,
-            });
-          }}
-          onChangeTunnelEnv={setTunnelEnv}
-          onToggleFollowDefault={() => setFollowLive((f) => !f)}
-          onToggleTelegram={() => {
-            const next = triadeApi.setTelegramEnabled(!telegramEnabled);
-            setTelegramEnabled(next);
-            pushToast({
-              tone: 'info',
-              title: `TelegramNotifier ${next ? 'ligado' : 'desligado'}`,
-            });
-          }}
-          onLockSession={() => setLocked(true)}
-          onVpsConnected={fetchAll}
-        />
-      )}
-
-      {dangerModal && (
-        <ConfirmDangerModal
-          open={dangerModal.open}
-          action={dangerModal.action}
-          targetAgent={dangerModal.target}
-          allAgents={allAgentsList}
-          offline={offline}
-          onClose={() => setDangerModal(null)}
-          onConfirm={handleConfirmDanger}
-        />
-      )}
-    </AppShell>
+        {route === 'settings' && (
+          <SettingsView
+            tunnelEnv={tunnelEnv}
+            apiBaseLabel={apiBaseLabel}
+            followDefault={followLive}
+            telegramFlags={telegramFlags}
+            health={health}
+            onChangeTunnelEnv={setTunnelEnv}
+            onToggleFollowDefault={() => setFollowLive((f) => !f)}
+            onApplyBase={(apiBase) => {
+              triadeApi.setConnection(apiBase);
+              setTunnelEnv(apiBase ? `túnel · ${apiBase}` : 'mesma origem · /api/v2');
+              setStreamEpoch((n) => n + 1);
+              fetchAll();
+            }}
+          />
+        )}
+      </AppShell>
+    </LiveRevisionContext.Provider>
   );
 }

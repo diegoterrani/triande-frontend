@@ -1,328 +1,167 @@
 import React, { useState } from 'react';
-import { Copy, KeyRound, Lock, ShieldCheck } from 'lucide-react';
+import { READONLY_CONTROL_NOTE } from '../../api/readonly';
 import { triadeApi } from '../../api/triade';
-import { ApiTokenRecord, UserOperator, UserRole } from '../../types/triade';
-import { formatBrasiliaTime } from '../../utils/format';
+import { AgentId, HealthResponse } from '../../types/triade';
+import { AGENT_NAMES } from '../../utils/format';
 import { StatusBadge } from '../ui/Primitives';
 
 export const SettingsView: React.FC<{
-  role: UserRole;
-  operatorName: string;
   tunnelEnv: string;
+  apiBaseLabel: string;
   followDefault: boolean;
-  telegramEnabled: boolean;
-  onChangeRole: (role: UserRole, name: string) => void;
+  telegramFlags: Record<AgentId, boolean | null>;
+  health: HealthResponse | null;
   onChangeTunnelEnv: (env: string) => void;
   onToggleFollowDefault: () => void;
-  onToggleTelegram: () => void;
-  onLockSession: () => void;
-  onVpsConnected: () => void;
+  onApplyBase: (apiBase: string) => void;
 }> = ({
-  role,
-  operatorName,
   tunnelEnv,
+  apiBaseLabel,
   followDefault,
-  telegramEnabled,
-  onChangeRole,
+  telegramFlags,
+  health,
   onChangeTunnelEnv,
   onToggleFollowDefault,
-  onToggleTelegram,
-  onLockSession,
-  onVpsConnected,
+  onApplyBase,
 }) => {
-  const [users] = useState<UserOperator[]>(() => triadeApi.getUsers());
-  const [tokens, setTokens] = useState<ApiTokenRecord[]>(() => triadeApi.getTokens());
-  const [newTokenLabel, setNewTokenLabel] = useState('');
-  const [newTokenRole, setNewTokenRole] = useState<UserRole>('service');
-  const [issuedOnce, setIssuedOnce] = useState<string | null>(null);
+  const current = triadeApi.getConfig();
+  const [apiBaseInput, setApiBaseInput] = useState(current.apiBase);
+  const [tokenInput, setTokenInput] = useState('');
+  const [feedback, setFeedback] = useState<string | null>(null);
 
-  const currentCfg = triadeApi.getConfig();
-  const [apiBaseInput, setApiBaseInput] = useState(currentCfg.apiBase || '');
-  const [apiTokenInput, setApiTokenInput] = useState('');
-  const [connFeedback, setConnFeedback] = useState<string | null>(null);
-
-  const handleIssueToken = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTokenLabel.trim() || role !== 'owner') return;
-    const { record, plaintextOnce } = triadeApi.issueToken(newTokenLabel.trim(), newTokenRole);
-    setTokens((prev) => [record, ...prev]);
-    setIssuedOnce(plaintextOnce);
-    setNewTokenLabel('');
-  };
-
-  const handleRevoke = (id: string) => {
-    if (role !== 'owner') return;
-    setTokens(triadeApi.revokeToken(id));
-  };
-
-  const handleConnectVps = (e: React.FormEvent) => {
-    e.preventDefault();
-    triadeApi.setConnection(apiBaseInput, apiTokenInput);
-    setApiTokenInput('');
-    setConnFeedback(
-      apiBaseInput.trim()
-        ? `Apontando para ${apiBaseInput.trim()} via Bearer token.`
-        : 'Retornado ao modo preview local da especificação.'
+  const apply = (event: React.FormEvent) => {
+    event.preventDefault();
+    const next = apiBaseInput.trim();
+    triadeApi.setConnection(next, tokenInput);
+    setTokenInput('');
+    onChangeTunnelEnv(next ? `túnel · ${next}` : 'mesma origem · /api/v2');
+    onApplyBase(next);
+    setFeedback(
+      next
+        ? `Base da API: ${next}. O token, se informado, fica só na memória deste separador.`
+        : 'Base vazia: os pedidos vão para a mesma origem (/api/v2).'
     );
-    onVpsConnected();
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-[22px] font-semibold text-[#e6edf3]">
-            Configurações e usuários
-          </h1>
-          <p className="text-xs text-[#8b9bb4] mt-0.5">
-            Operadores, papéis, tokens de serviço, 2FA (TOTP) e conexão com o túnel do VPS
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={onLockSession}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs font-medium text-[#e6edf3] hover:bg-[#1c2330]"
-        >
-          <Lock className="h-3.5 w-3.5" /> Testar tela de bloqueio / login
-        </button>
+      <div>
+        <h1 className="text-[22px] font-semibold text-[#e6edf3]">Conexão e preferências</h1>
+        <p className="text-xs text-[#8b9bb4] mt-0.5">
+          Este servidor não tem usuários, tokens persistidos nem auditoria de login. {READONLY_CONTROL_NOTE}
+        </p>
       </div>
 
-      {/* VPS Tunnel Integration */}
-      <section className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 space-y-4">
+      <section className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-base font-semibold text-[#e6edf3]">
-              Conexão com a API do VPS (túnel SSH / Tailscale)
-            </h2>
-            <p className="text-xs text-[#8b9bb4]">
-              O painel no VPS escuta apenas em 127.0.0.1:8765. Deixe vazio para usar os dados
-              ilustrativos da especificação v1.0.
-            </p>
-          </div>
+          <h2 className="text-base font-semibold text-[#e6edf3]">API /api/v2</h2>
           <StatusBadge
-            variant={triadeApi.isUsingRemoteVps() ? 'ok' : 'info'}
-            label={triadeApi.isUsingRemoteVps() ? 'VPS remoto configurado' : 'Modo preview local'}
+            variant={health?.ok ? 'ok' : 'warn'}
+            label={health?.stub ? 'STUB LOCAL' : health?.ok ? 'health ok' : 'sem health'}
           />
         </div>
-
-        <pre className="rounded-lg border border-[#30363d] bg-[#0b0f14] p-3 font-mono text-[11px] text-[#8b9bb4] overflow-x-auto">
-          ssh -L 8765:127.0.0.1:8765 -L 5971:127.0.0.1:5971 -L 5972:127.0.0.1:5972 user@&lt;vps&gt;
-        </pre>
-
-        <form onSubmit={handleConnectVps} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <div>
-            <label className="block text-[11px] uppercase text-[#8b9bb4] mb-1">
-              VITE_TRIADE_API_BASE
-            </label>
+            <dt className="text-[#8b9bb4]">Origem em uso</dt>
+            <dd className="font-mono text-[#e6edf3] mt-0.5">{apiBaseLabel || 'mesma origem'}</dd>
+          </div>
+          <div>
+            <dt className="text-[#8b9bb4]">Rótulo da sessão</dt>
+            <dd className="font-mono text-[#e6edf3] mt-0.5">{tunnelEnv}</dd>
+          </div>
+          <div>
+            <dt className="text-[#8b9bb4]">Versão / bind</dt>
+            <dd className="font-mono text-[#e6edf3] mt-0.5">
+              {health?.version ?? '—'} · {health?.bind || '—'}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[#8b9bb4]">Somente leitura / auth</dt>
+            <dd className="font-mono text-[#e6edf3] mt-0.5">
+              readonly={String(health?.readonly ?? true)} · auth_required=
+              {String(health?.auth_required ?? false)}
+            </dd>
+          </div>
+        </dl>
+        <form onSubmit={apply} className="space-y-2">
+          <label className="block text-xs text-[#8b9bb4]">
+            VITE_API_BASE (vazio = mesma origem; túnel = http://127.0.0.1:8765)
             <input
-              type="text"
               value={apiBaseInput}
               onChange={(e) => setApiBaseInput(e.target.value)}
-              placeholder="http://127.0.0.1:8765 (ou vazio para preview)"
-              className="w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs font-mono text-[#e6edf3]"
-            />
-          </div>
-          <div>
-            <label className="block text-[11px] uppercase text-[#8b9bb4] mb-1">
-              Bearer Token (somente em memória)
-            </label>
-            <input
-              type="password"
-              value={apiTokenInput}
-              onChange={(e) => setApiTokenInput(e.target.value)}
-              placeholder="Nunca persistido em localStorage nem git"
-              className="w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs font-mono text-[#e6edf3]"
-            />
-          </div>
-          <button
-            type="submit"
-            className="rounded-lg bg-[#7aa2f7] px-4 py-1.5 text-xs font-semibold text-[#0d1117] hover:opacity-90 h-[34px]"
-          >
-            Aplicar conexão
-          </button>
-        </form>
-        {connFeedback && <p className="text-xs text-[#3fb950]">{connFeedback}</p>}
-      </section>
-
-      {/* Operators & Roles */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <section className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-[#e6edf3]">Operadores e papéis</h2>
-            <span className="text-xs font-mono text-[#8b9bb4]">
-              atual: {operatorName} ({role})
-            </span>
-          </div>
-          <div className="divide-y divide-[#30363d]">
-            {users.map((u) => (
-              <div key={u.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
-                <div>
-                  <div className="font-semibold text-[#e6edf3]">{u.name}</div>
-                  <div className="text-[#8b9bb4] font-mono text-[11px]">
-                    {u.email} · papel: {u.role} · TOTP: {u.totp_enabled ? 'ativo' : 'não'}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onChangeRole(u.role, u.name)}
-                  disabled={role === u.role}
-                  className="rounded border border-[#30363d] bg-[#21262d] px-2.5 py-1 text-[11px] font-medium text-[#e6edf3] disabled:opacity-45"
-                >
-                  {role === u.role ? 'Ativo' : `Simular ${u.role}`}
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* API Tokens */}
-        <section className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-[#7aa2f7]" />
-            <h2 className="text-base font-semibold text-[#e6edf3]">Tokens de API</h2>
-          </div>
-
-          <form onSubmit={handleIssueToken} className="flex flex-wrap gap-2">
-            <input
-              type="text"
-              value={newTokenLabel}
-              onChange={(e) => setNewTokenLabel(e.target.value)}
-              placeholder="Rótulo do token (ex.: Script leitura)"
-              disabled={role !== 'owner'}
-              className="flex-1 min-w-[160px] rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs text-[#e6edf3]"
-            />
-            <select
-              value={newTokenRole}
-              onChange={(e) => setNewTokenRole(e.target.value as UserRole)}
-              disabled={role !== 'owner'}
-              className="rounded-lg border border-[#30363d] bg-[#0d1117] px-2.5 py-1.5 text-xs text-[#e6edf3]"
-            >
-              <option value="service">service</option>
-              <option value="auditor">auditor</option>
-              <option value="owner">owner</option>
-            </select>
-            <button
-              type="submit"
-              disabled={role !== 'owner' || !newTokenLabel.trim()}
-              className="rounded-lg bg-[#7aa2f7] px-3 py-1.5 text-xs font-semibold text-[#0d1117] disabled:opacity-45"
-            >
-              Emitir token
-            </button>
-          </form>
-
-          {issuedOnce && (
-            <div className="rounded-lg border border-[#3fb950]/50 bg-[#3fb950]/10 p-3 text-xs space-y-1">
-              <div className="font-semibold text-[#3fb950]">
-                Token exibido apenas uma vez — copie agora:
-              </div>
-              <div className="flex items-center justify-between gap-2 font-mono text-[#e6edf3]">
-                <span className="break-all">{issuedOnce}</span>
-                <button
-                  type="button"
-                  onClick={() => navigator.clipboard?.writeText(issuedOnce)}
-                  className="rounded border border-[#30363d] bg-[#0d1117] p-1 text-[#e6edf3]"
-                  aria-label="Copiar token"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="divide-y divide-[#30363d] text-xs">
-            {tokens.map((t) => (
-              <div key={t.id} className="py-2 flex items-center justify-between gap-2">
-                <div>
-                  <div className="font-medium text-[#e6edf3]">
-                    {t.label} <span className="font-mono text-[#8b9bb4]">({t.prefix})</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-[#8b9bb4]">
-                    papel: {t.role} · criado: {formatBrasiliaTime(t.created_at, true)}
-                  </div>
-                </div>
-                {t.revoked ? (
-                  <StatusBadge variant="neutral" label="revogado" />
-                ) : (
-                  <button
-                    type="button"
-                    disabled={role !== 'owner'}
-                    onClick={() => handleRevoke(t.id)}
-                    className="rounded border border-[#f85149]/40 px-2.5 py-1 text-[11px] text-[#f85149] hover:bg-[#f85149]/10 disabled:opacity-45"
-                  >
-                    Revogar
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      {/* Preferences & Integrations & About */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <section className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 space-y-3 text-xs">
-          <h2 className="text-base font-semibold text-[#e6edf3]">Preferências e integrações</h2>
-          <div className="flex items-center justify-between py-1">
-            <span className="text-[#8b9bb4]">Fuso horário de exibição</span>
-            <span className="font-mono text-[#e6edf3]">America/Sao_Paulo (horário de Brasília)</span>
-          </div>
-          <div className="flex items-center justify-between py-1">
-            <span className="text-[#8b9bb4]">Ambiente de acesso exibido no chrome</span>
-            <select
-              value={tunnelEnv}
-              onChange={(e) => onChangeTunnelEnv(e.target.value)}
-              className="rounded border border-[#30363d] bg-[#0d1117] px-2.5 py-1 text-xs font-mono text-[#e6edf3]"
-            >
-              <option value="local · 127.0.0.1:8765">local · 127.0.0.1:8765</option>
-              <option value="túnel SSH · 127.0.0.1:8765">túnel SSH · 127.0.0.1:8765</option>
-              <option value="Tailscale (tailnet privada)">Tailscale (tailnet privada)</option>
-            </select>
-          </div>
-          <label className="flex items-center justify-between py-1 cursor-pointer">
-            <span className="text-[#8b9bb4]">Seguir timeline automaticamente</span>
-            <input
-              type="checkbox"
-              checked={followDefault}
-              onChange={onToggleFollowDefault}
-              className="accent-[#7aa2f7]"
+              placeholder="http://127.0.0.1:8765"
+              className="mt-1 w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-2 font-mono text-xs text-[#e6edf3]"
             />
           </label>
-          <div className="flex items-center justify-between py-1 border-t border-[#30363d] pt-3">
-            <div>
-              <div className="text-[#e6edf3] font-medium">TelegramNotifier (v2)</div>
-              <div className="text-[11px] text-[#8b9bb4]">
-                TELEGRAM_BOT_TOKEN e CHAT_ID permanecem apenas no .env do VPS
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={role !== 'owner'}
-              onClick={onToggleTelegram}
-              className="rounded-lg border border-[#30363d] bg-[#21262d] px-3 py-1 text-xs font-medium text-[#e6edf3] disabled:opacity-45"
-            >
-              {telegramEnabled ? 'Ligado (desligar)' : 'Desligado (ligar)'}
-            </button>
-          </div>
-        </section>
+          <label className="block text-xs text-[#8b9bb4]">
+            Bearer opcional (não é exigido; não é gravado)
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              autoComplete="off"
+              placeholder="deixe vazio"
+              className="mt-1 w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-2 font-mono text-xs text-[#e6edf3]"
+            />
+          </label>
+          <button
+            type="submit"
+            className="rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs font-medium text-[#e6edf3]"
+          >
+            Aplicar base
+          </button>
+          {feedback && <p className="text-xs text-[#8b9bb4]">{feedback}</p>}
+        </form>
+        <pre className="overflow-x-auto rounded-lg border border-[#30363d] bg-[#0b0f14] p-3 text-[11px] text-[#8b9bb4]">{`ssh -L 8765:127.0.0.1:8765 -L 5971:127.0.0.1:5971 -L 5972:127.0.0.1:5972 user@<vps>`}</pre>
+      </section>
 
-        <section className="rounded-xl border border-[#30363d] bg-[#161b22] p-4 space-y-2 text-xs text-[#8b9bb4]">
-          <div className="flex items-center gap-2 text-sm font-semibold text-[#e6edf3]">
-            <ShieldCheck className="h-4 w-4 text-[#3fb950]" />
-            Sobre o Super Painel TRIADE
-          </div>
-          <p>
-            Especificação v1.0 · evoluído sobre o rascunho somente leitura de{' '}
-            <code className="text-[#e6edf3]">127.0.0.1:8765</code> (<code className="text-[#e6edf3]">frontend/server.py</code>).
-          </p>
-          <p>
-            2FA (TOTP) obrigatório em comandos <code className="text-[#e6edf3]">flatten</code>,{' '}
-            <code className="text-[#e6edf3]">kill</code>, <code className="text-[#e6edf3]">kill-clear</code>,{' '}
-            <code className="text-[#e6edf3]">reset-halt</code> e <code className="text-[#e6edf3]">unit stop</code> quando{' '}
-            <code className="text-[#e6edf3]">live_enabled: true</code>. No modo preview local, qualquer código numérico de 6 dígitos (ex.: <code className="text-[#e6edf3]">123456</code>) valida o fluxo 2FA.
-          </p>
-        </section>
-      </div>
+      <section className="rounded-xl border border-[#30363d] bg-[#1c2330] p-4 space-y-3">
+        <h2 className="text-base font-semibold text-[#e6edf3]">Telegram (flag do YAML, sem toggle)</h2>
+        <ul className="space-y-1.5 text-xs">
+          {(['b3', 'nasdaq', 'crypto'] as AgentId[]).map((id) => (
+            <li key={id} className="flex items-center justify-between gap-3">
+              <span className="text-[#e6edf3]">{AGENT_NAMES[id]}</span>
+              <StatusBadge
+                variant={telegramFlags[id] === true ? 'ok' : 'neutral'}
+                label={
+                  telegramFlags[id] === null
+                    ? 'não informado'
+                    : telegramFlags[id]
+                      ? 'telegram_enabled true'
+                      : 'telegram_enabled false'
+                }
+              />
+            </li>
+          ))}
+        </ul>
+        <p className="text-[11px] text-[#8b9bb4]">
+          notifications.telegram_enabled é só leitura. Não há endpoint para ligar ou desligar o bot.
+        </p>
+      </section>
+
+      <section className="rounded-xl border border-[#30363d] bg-[#161b22] p-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-[#e6edf3]">Seguir a timeline ao vivo</h2>
+          <p className="text-xs text-[#8b9bb4] mt-0.5">Preferência local deste navegador. Não altera o servidor.</p>
+        </div>
+        <button
+          type="button"
+          onClick={onToggleFollowDefault}
+          className="rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs text-[#e6edf3]"
+        >
+          {followDefault ? 'seguindo' : 'pausado'}
+        </button>
+      </section>
+
+      <section className="rounded-xl border border-[#30363d] bg-[#161b22] p-4 text-xs text-[#8b9bb4] space-y-1">
+        <p>Indisponível neste backend (estado vazio, sem dados de exemplo):</p>
+        <ul className="list-disc pl-4 space-y-0.5">
+          <li>usuários, papéis e 2FA</li>
+          <li>emissão e revogação de tokens</li>
+          <li>trilha de auditoria (var/dashboard/audit.jsonl ainda não existe)</li>
+          <li>acknowledgement de alertas no servidor</li>
+        </ul>
+      </section>
     </div>
   );
 };
