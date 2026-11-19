@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { annotateAlertModes, triadeApi } from './api/triade';
 import { LiveRevisionContext } from './api/liveContext';
+import { AdminModal } from './components/admin/AdminModal';
 import { AppShell, ToastMessage } from './components/layout/AppShell';
 import { AgentDetailView } from './components/views/AgentDetailView';
 import { AlertsView } from './components/views/AlertsView';
@@ -132,6 +133,8 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminUser, setAdminUser] = useState<string | null>(null);
 
   const pushToast = useCallback((t: Omit<ToastMessage, 'id'>) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -248,7 +251,10 @@ export default function App() {
         status={status}
         connection={connection}
         role="auditor"
-        operatorName="Sem autenticação"
+        operatorName={adminUser ?? 'sem sessão admin'}
+        adminUser={adminUser}
+        adminOpen={adminOpen}
+        onOpenAdmin={() => setAdminOpen(true)}
         tunnelEnv={tunnelEnv}
         stub={health?.stub === true}
         onOpenKillAll={() => undefined}
@@ -370,6 +376,13 @@ export default function App() {
           />
         )}
       </AppShell>
+      {adminOpen && (
+        <AdminModal
+          stub={health?.stub === true}
+          onClose={() => setAdminOpen(false)}
+          onUser={setAdminUser}
+        />
+      )}
     </LiveRevisionContext.Provider>
   );
 }

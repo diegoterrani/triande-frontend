@@ -48,7 +48,7 @@ export const SettingsView: React.FC<{
       <div>
         <h1 className="text-[22px] font-semibold text-[#e6edf3]">Conexão e preferências</h1>
         <p className="text-xs text-[#8b9bb4] mt-0.5">
-          Este servidor não tem usuários, tokens persistidos nem auditoria de login. {READONLY_CONTROL_NOTE}
+          Preferências deste navegador. A sessão administrativa fica em Administração e não é gravada aqui. {READONLY_CONTROL_NOTE}
         </p>
       </div>
 
