@@ -134,6 +134,31 @@ describe('mapTimeline', () => {
     assert.equal(timeline.total_matched, null);
     assert.equal(timeline.missing.length, 0);
   });
+
+  it('inherits live from the journal file and does not default a modeless event to paper', () => {
+    const fromFile = mapTimeline({
+      mode: 'all',
+      files: [{ agent: 'b3', path: 'var/b3/journal/live.jsonl', exists: true }],
+      events: [{ ts: '2026-11-19T12:27:50Z', event: 'reconcile', agent: 'b3' }],
+    });
+    assert.equal(fromFile.sources[0].mode, 'live');
+    assert.equal(fromFile.events[0].mode, 'live');
+
+    const ambiguous = mapTimeline({
+      mode: 'all',
+      files: [
+        { agent: 'b3', mode: 'live', path: 'var/b3/journal/live.jsonl', exists: true },
+        { agent: 'b3', mode: 'paper', path: 'var/b3/journal/paper.jsonl', exists: true },
+      ],
+      events: [{ ts: '2026-11-19T12:27:50Z', event: 'fill', agent: 'b3' }],
+    });
+    assert.equal(ambiguous.events[0].mode, 'unknown');
+
+    const stream = mapTimeline({
+      events: [{ ts: '2026-11-19T12:27:50Z', event: 'fill', agent: 'b3' }],
+    });
+    assert.equal(stream.events[0].mode, 'unknown');
+  });
 });
 
 describe('mapRisk', () => {
@@ -302,7 +327,7 @@ describe('attachInfra', () => {
       server_clock_utc: '',
       server_clock_brt: '2026-11-19T11:14:31-03:00',
       disk_var: { path: 'var/', used_mb: null, total_mb: null, used_pct: null, inode_pct: null, journal_largest_file: null, journal_largest_mb: null },
-      units: [{ agent: 'b3' as const, role: 'agent' as const, unit: 'triade-agent-b3', active: 'active', enabled: 'disabled' }],
+      units: [{ agent: 'b3' as const, role: 'agent' as const, unit: 'triade-agent-b3.service', active: 'active', enabled: 'disabled' }],
       ports: [
         { port: 18863, service: 'ponte live', binds: ['127.0.0.1:18863'], listening: true, localhost_only: true, unsafe_binds: [], pong: false, note: 'timed out' },
         { port: 18861, service: 'ponte oficial', binds: ['127.0.0.1:18861'], listening: true, localhost_only: true, unsafe_binds: [], pong: true },

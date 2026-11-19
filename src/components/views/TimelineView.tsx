@@ -492,7 +492,11 @@ export const TimelineView: React.FC<{
                       <span className="text-xs font-semibold text-[#e6edf3]">
                         {AGENT_NAMES[ev.agent]}
                       </span>
-                      <ModeBadge live={ev.mode === 'live'} compact />
+                      {ev.mode === 'unknown' ? (
+                        <StatusBadge variant="neutral" label="sem modo" />
+                      ) : (
+                        <ModeBadge live={ev.mode === 'live'} compact />
+                      )}
                       <span className="text-xs font-semibold text-[#e6edf3]">
                         {EVENT_LABELS[ev.event] ?? ev.event}
                       </span>

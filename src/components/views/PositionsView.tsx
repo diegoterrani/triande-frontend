@@ -244,8 +244,16 @@ export const PositionsView: React.FC<{
                     <td className="px-4 py-2.5 text-[#8b9bb4]">{formatBrasiliaTime(ev.ts)}</td>
                     <td className="px-4 py-2.5 font-sans">
                       {AGENT_NAMES[ev.agent]} ·{' '}
-                      <span className={ev.mode === 'live' ? 'text-[#f85149]' : 'text-[#58a6ff]'}>
-                        {ev.mode === 'live' ? 'REAL' : 'PAPEL'}
+                      <span
+                        className={
+                          ev.mode === 'live'
+                            ? 'text-[#f85149]'
+                            : ev.mode === 'paper'
+                              ? 'text-[#58a6ff]'
+                              : 'text-[#8b9bb4]'
+                        }
+                      >
+                        {ev.mode === 'live' ? 'REAL' : ev.mode === 'paper' ? 'PAPEL' : 'sem modo'}
                       </span>
                     </td>
                     <td className="px-4 py-2.5 font-sans text-[#e6edf3]">

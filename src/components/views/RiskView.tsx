@@ -23,9 +23,11 @@ export const RiskView: React.FC<{ initialAgent?: AgentId }> = ({ initialAgent = 
   const [rejects, setRejects] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const revision = useContext(LiveRevisionContext);
 
-  const loadRisk = () => {
+  useEffect(() => {
+    let cancel = false;
     setLoading(true);
     setError(null);
     Promise.all([
@@ -33,16 +35,20 @@ export const RiskView: React.FC<{ initialAgent?: AgentId }> = ({ initialAgent = 
       triadeApi.getTimeline({ agent, event: 'reject', mode: 'all', limit: 50 }).catch(() => null),
     ])
       .then(([res, timeline]) => {
+        if (cancel) return;
         setRisk(res);
         setRejects((timeline?.events ?? []).filter((event) => event.event === 'reject'));
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Falha ao carregar risco'))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    loadRisk();
-  }, [agent, profile, revision]);
+      .catch((err) => {
+        if (!cancel) setError(err instanceof Error ? err.message : 'Falha ao carregar risco');
+      })
+      .finally(() => {
+        if (!cancel) setLoading(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [agent, profile, revision, retry]);
 
   const qtyValues = risk ? Object.values(risk.limits.max_qty) : [];
   const maxQtyLimit = qtyValues.length ? Math.max(...qtyValues) : null;
@@ -112,7 +118,7 @@ export const RiskView: React.FC<{ initialAgent?: AgentId }> = ({ initialAgent = 
         </div>
       </div>
 
-      {error && <ErrorState message={error} onRetry={loadRisk} />}
+      {error && <ErrorState message={error} onRetry={() => setRetry((n) => n + 1)} />}
 
       {loading && !risk ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">

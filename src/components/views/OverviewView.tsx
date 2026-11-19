@@ -512,10 +512,14 @@ export const OverviewView: React.FC<{
                       </span>
                       <span
                         className={`font-mono text-[10px] font-semibold uppercase shrink-0 ${
-                          ev.mode === 'live' ? 'text-[#f85149]' : 'text-[#58a6ff]'
+                          ev.mode === 'live'
+                            ? 'text-[#f85149]'
+                            : ev.mode === 'paper'
+                              ? 'text-[#58a6ff]'
+                              : 'text-[#8b9bb4]'
                         }`}
                       >
-                        {ev.mode === 'live' ? 'REAL' : 'PAPEL'}
+                        {ev.mode === 'live' ? 'REAL' : ev.mode === 'paper' ? 'PAPEL' : 'sem modo'}
                       </span>
                       <span className="font-medium text-[#e6edf3] shrink-0">
                         {EVENT_LABELS[ev.event] ?? ev.event}

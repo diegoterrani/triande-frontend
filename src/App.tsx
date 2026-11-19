@@ -114,6 +114,7 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>('reconnecting');
   const [followLive, setFollowLive] = useState<boolean>(true);
   const [revision, setRevision] = useState(0);
+  const [streamEpoch, setStreamEpoch] = useState(0);
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -147,26 +148,28 @@ export default function App() {
         await Promise.all([
           triadeApi.getHealth().catch(() => null),
           triadeApi.getStatusWithInfra(),
-          triadeApi.getTimeline({ agent: 'all', mode: 'all', limit: 200 }),
-          triadeApi.getAnalystEvents('all'),
-          triadeApi.getAlerts(),
-          triadeApi.getAudit(),
-          triadeApi.getBacktests().catch(() => [] as BacktestReport[]),
-          triadeApi.getStrategies(),
-          triadeApi.getTelegramFlags(),
+          triadeApi.getTimeline({ agent: 'all', mode: 'all', limit: 200 }).catch(() => null),
+          triadeApi.getAnalystEvents('all').catch(() => null),
+          triadeApi.getAlerts().catch(() => null),
+          triadeApi.getAudit().catch(() => null),
+          triadeApi.getBacktests().catch(() => null),
+          triadeApi.getStrategies().catch(() => null),
+          triadeApi.getTelegramFlags().catch(() => null),
         ]);
       setHealth(healthResult);
       setStatus(statusPack.status);
       setInfra(statusPack.infra);
       setInfraError(statusPack.infraError);
-      setTimelineData(timeline);
-      setAnalystEvents(analyst);
-      setAlertsPayload(annotateAlertModes(alerts, statusPack.status));
-      setAuditEntries(audit.entries);
-      setAuditNote(audit.note);
-      setBacktests(reports);
-      setStrategies(configs);
-      setTelegramFlags(flags);
+      if (timeline) setTimelineData(timeline);
+      if (analyst) setAnalystEvents(analyst);
+      if (alerts) setAlertsPayload(annotateAlertModes(alerts, statusPack.status));
+      if (audit) {
+        setAuditEntries(audit.entries);
+        setAuditNote(audit.note);
+      }
+      if (reports) setBacktests(reports);
+      if (configs) setStrategies(configs);
+      if (flags) setTelegramFlags(flags);
       setConnection((prev) => (prev === 'sse' ? 'sse' : 'polling'));
       setRevision((n) => n + 1);
     } catch (err) {
@@ -194,7 +197,7 @@ export default function App() {
       },
     });
     return unsub;
-  }, [followLive, fetchAll]);
+  }, [followLive, fetchAll, streamEpoch]);
 
   const handleNavigate = useCallback(
     (nextRoute: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => {
@@ -361,6 +364,7 @@ export default function App() {
             onApplyBase={(apiBase) => {
               triadeApi.setConnection(apiBase);
               setTunnelEnv(apiBase ? `túnel · ${apiBase}` : 'mesma origem · /api/v2');
+              setStreamEpoch((n) => n + 1);
               fetchAll();
             }}
           />

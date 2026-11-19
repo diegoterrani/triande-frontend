@@ -73,8 +73,9 @@ export const PnLView: React.FC<{
     const points = (payload?.series ?? []).filter((point) => inPeriod(point.ts, period));
     const currency = payload?.currency ?? AGENT_CURRENCIES[agent];
     const known = points.filter((point) => point.trade_pnl != null);
-    const totalPnl = known.reduce((acc, point) => acc + (point.trade_pnl ?? 0), 0);
-    const totalFees = points.reduce((acc, point) => acc + (point.fees ?? 0), 0);
+    const totalPnl = known.reduce((acc, point) => acc + (point.trade_pnl as number), 0);
+    const feePoints = points.filter((point) => point.fees != null);
+    const totalFees = feePoints.reduce((acc, point) => acc + (point.fees as number), 0);
     const wins = known.filter((point) => (point.trade_pnl ?? 0) > 0);
     const losses = known.filter((point) => (point.trade_pnl ?? 0) < 0);
     const winRate = known.length > 0 ? wins.length / known.length : null;
@@ -94,7 +95,7 @@ export const PnLView: React.FC<{
           ts: point.ts,
           cumulative,
           symbol: point.symbol,
-          pnl: point.trade_pnl ?? 0,
+          pnl: point.trade_pnl,
         };
       });
     const bySource: Record<string, { pnl: number; count: number }> = {};
@@ -113,7 +114,7 @@ export const PnLView: React.FC<{
       currency,
       trades: points,
       totalPnl: known.length ? totalPnl : null,
-      totalFees: points.some((point) => point.fees != null) ? totalFees : null,
+      totalFees: feePoints.length ? totalFees : null,
       wins: wins.length,
       losses: losses.length,
       winRate,
@@ -334,11 +335,13 @@ export const PnLView: React.FC<{
                   Resultado por trade
                 </h2>
                 <PnLBarChart
-                  items={singleStats.trades.map((t, i) => ({
-                    label: `#${i + 1} ${t.symbol ?? ''}`,
-                    ts: t.ts,
-                    pnl: t.trade_pnl ?? 0,
-                  }))}
+                  items={singleStats.trades
+                    .filter((t) => t.trade_pnl != null)
+                    .map((t, i) => ({
+                      label: `#${i + 1} ${t.symbol ?? ''}`,
+                      ts: t.ts,
+                      pnl: t.trade_pnl as number,
+                    }))}
                   currency={singleStats.currency}
                 />
               </div>

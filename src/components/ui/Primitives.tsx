@@ -244,7 +244,7 @@ export const SkeletonCard: React.FC<{ lines?: number }> = ({ lines = 4 }) => (
 );
 
 export const PnLLineChart: React.FC<{
-  points: Array<{ ts: string; cumulative: number; symbol?: string; pnl: number }>;
+  points: Array<{ ts: string; cumulative: number; symbol?: string; pnl: number | null }>;
   currency: CurrencyCode;
 }> = ({ points, currency }) => {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -341,7 +341,7 @@ export const PnLLineChart: React.FC<{
               cx={pt.x}
               cy={pt.y}
               r={hoverIdx === i ? 5.5 : 3.5}
-              fill={pt.pnl >= 0 ? '#3fb950' : '#f85149'}
+              fill={pt.pnl == null ? '#8b9bb4' : pt.pnl >= 0 ? '#3fb950' : '#f85149'}
               stroke="#0d1117"
               strokeWidth={1.5}
               className="cursor-pointer"

@@ -221,7 +221,7 @@ export interface TimelineEvent {
   ts: string;
   event: TimelineEventType | string;
   agent: AgentId;
-  mode: 'live' | 'paper';
+  mode: 'live' | 'paper' | 'unknown';
   source_file: string;
   symbol?: string;
   contract?: string;
@@ -262,7 +262,7 @@ export interface TimelineSourceInfo {
   path: string;
   exists: boolean;
   kind: 'journal' | 'events';
-  mode: 'live' | 'paper';
+  mode: 'live' | 'paper' | 'unknown';
 }
 
 export interface TimelineResponse {
@@ -663,7 +663,7 @@ export interface ChartTradeSpan {
   entry_reason?: string;
   exit_reason?: string;
   source?: string;
-  mode: 'live' | 'paper';
+  mode: 'live' | 'paper' | 'unknown';
   status: 'closed' | 'open';
   stopPrice?: number | null;
   targetPrice?: number | null;

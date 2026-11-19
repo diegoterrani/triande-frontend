@@ -26,6 +26,7 @@ import {
   SystemdUnitState,
   TimelineEvent,
   TimelineResponse,
+  TimelineSourceInfo,
 } from '../types/triade';
 
 export const AGENT_IDS: AgentId[] = ['b3', 'nasdaq', 'crypto'];
@@ -302,14 +303,32 @@ export function mapHealth(raw: unknown): HealthResponse {
   };
 }
 
+/** live/paper only when the payload or a journal path says so. Never assume paper. */
+export function journalModeFromHint(
+  ...hints: Array<string | null | undefined>
+): 'live' | 'paper' | undefined {
+  for (const hint of hints) {
+    if (!hint) continue;
+    if (hint === 'live' || hint === 'paper') return hint;
+    if (/(^|\/)live(\.jsonl)?$/.test(hint) || hint.includes('/logs/live') || hint.includes('/journal/live')) {
+      return 'live';
+    }
+    if (/(^|\/)paper(\.jsonl)?$/.test(hint) || hint.includes('/logs/paper') || hint.includes('/journal/paper')) {
+      return 'paper';
+    }
+  }
+  return undefined;
+}
+
 function mapTimelineEvent(value: unknown, fallback?: { agent?: AgentId; mode?: 'live' | 'paper'; path?: string }): TimelineEvent | null {
   const record = asRecord(value);
   if (!record) return null;
   const agent = isAgentId(record.agent) ? record.agent : fallback?.agent;
   if (!agent) return null;
-  const modeRaw = str(record.mode);
-  const mode: 'live' | 'paper' =
-    modeRaw === 'live' || modeRaw === 'paper' ? modeRaw : (fallback?.mode ?? 'paper');
+  const mode: 'live' | 'paper' | 'unknown' =
+    journalModeFromHint(str(record.mode), str(record.source_file), str(record.path), str(record.arquivo), fallback?.path) ??
+    fallback?.mode ??
+    'unknown';
   return {
     ts: str(record.ts) ?? '',
     event: str(record.event) ?? 'unknown',
@@ -357,26 +376,37 @@ export function mapTimeline(raw: unknown): TimelineResponse {
     .map((item) => {
       const file = asRecord(item);
       if (!file || !isAgentId(file.agent)) return null;
-      const mode = str(file.mode) === 'live' ? 'live' : 'paper';
-      return {
+      const path = str(file.path) ?? '';
+      const source: TimelineSourceInfo = {
         agent: file.agent,
-        path: str(file.path) ?? '',
+        path,
         exists: bool(file.exists) ?? false,
-        kind: 'journal' as const,
-        mode: mode as 'live' | 'paper',
+        kind: 'journal',
+        mode: journalModeFromHint(str(file.mode), path) ?? 'unknown',
       };
+      return source;
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
   const defaultAgent = isAgentId(record.agent) ? record.agent : undefined;
-  const defaultMode = str(record.mode) === 'live' ? 'live' : str(record.mode) === 'paper' ? 'paper' : undefined;
+  const defaultMode = journalModeFromHint(str(record.mode));
   const events = asArray(record.events)
-    .map((item) =>
-      mapTimelineEvent(item, {
+    .map((item) => {
+      const recordEvent = asRecord(item);
+      const agent = recordEvent && isAgentId(recordEvent.agent) ? recordEvent.agent : defaultAgent;
+      const forAgent = agent
+        ? sources.filter((source) => source.agent === agent && source.mode !== 'unknown')
+        : [];
+      const unique = new Set(forAgent.map((source) => source.mode));
+      const inherited = unique.size === 1 ? (forAgent[0].mode as 'live' | 'paper') : undefined;
+      const matchedPath = recordEvent
+        ? forAgent.find((source) => source.path && source.path === str(recordEvent.source_file))?.path
+        : undefined;
+      return mapTimelineEvent(item, {
         agent: defaultAgent,
-        mode: defaultMode,
-        path: sources[0]?.path,
-      })
-    )
+        mode: inherited ?? defaultMode,
+        path: matchedPath ?? (forAgent.length === 1 ? forAgent[0].path : undefined),
+      });
+    })
     .filter((item): item is TimelineEvent => item !== null);
   const missing = sources
     .filter((source) => !source.exists)
@@ -1006,7 +1036,10 @@ export function attachInfra(status: StatusResponse, infra: InfraResponse | null)
           : undefined,
       },
     };
-    const unitRow = infra.units.find((unit) => unit.unit === `triade-agent-${id}`);
+    const expectedUnit = `triade-agent-${id}`;
+    const unitRow =
+      infra.units.find((unit) => unit.agent === id && unit.role === 'agent') ??
+      infra.units.find((unit) => unit.unit.replace(/\.service$/i, '') === expectedUnit);
     if (unitRow) {
       nextAgents[id] = {
         ...nextAgents[id],
