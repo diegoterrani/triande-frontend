@@ -180,6 +180,7 @@ export interface HealthResponse {
   uptime_seconds?: number;
   version?: string;
   auth_required?: boolean;
+  authenticated?: boolean;
   server_time?: string;
   timezone?: string;
   /** Present only on the local contract stub used for screenshots. */

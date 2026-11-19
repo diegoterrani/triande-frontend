@@ -81,7 +81,7 @@ export function RiskPanel({
         if (err instanceof AdminApiError && (err.code === 'totp' || err.unauthenticated)) throw err;
         setError(formatAdminError(err));
       }
-    });
+    }, { method: 'PUT', path: '/api/v2/admin/crypto/risk' });
   };
 
   return (

@@ -1,6 +1,15 @@
 import React, { useEffect, useId, useState } from 'react';
 
-export type AdminWrite = (purpose: string, work: (totp: string) => Promise<void>) => void;
+export interface StepUpAction {
+  method: 'POST' | 'PUT';
+  path: string;
+}
+
+export type AdminWrite = (
+  purpose: string,
+  work: (totp: string) => Promise<void>,
+  action: StepUpAction
+) => void;
 
 export const adminInputClass =
   'w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-2 font-mono text-xs text-[#e6edf3] placeholder:text-[#8b9bb4]';
@@ -125,7 +134,7 @@ export function TotpDialog({
           código que entrou no login. Espere o próximo código no aplicativo autenticador e digite
           esse valor novo.
         </p>
-        <Field label="Código de 6 dígitos" error={code && !/^\d{6}$/.test(code) ? 'Use 6 dígitos.' : null}>
+        <Field label="Código 2FA" error={code && !/^\d{6}$/.test(code) ? 'Use 6 dígitos.' : null}>
           <input
             autoFocus
             type="password"

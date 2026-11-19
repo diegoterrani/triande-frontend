@@ -3,20 +3,34 @@
  * Responses set stub:true on /health so the UI shows STUB LOCAL.
  * This is not the VPS and must not be treated as live account data.
  *
- * `/api/v2/admin/*` is a stateful stand-in for the admin contract:
- * any unused 6-digit TOTP is accepted, a key containing WITHDRAW fails
- * the permission test, and secrets are never written to the log or the audit.
+ * `/api/v2/auth/*` is the app session (cookie triade_session, 7 days).
+ * `/api/v2/admin/{login,session,logout}` are aliases of those routes.
+ * Other `/api/v2/*` routes require that cookie. Admin writes need CSRF and,
+ * except logout, a fresh 6-digit TOTP. A key containing WITHDRAW fails the
+ * permission test. Secrets are never written to the log or the audit.
+ * The stub password is `stub-local-only`. A wrong password does not burn TOTP.
  */
 import { randomBytes } from 'node:crypto';
 import http from 'node:http';
 
 const PORT = Number(process.env.STUB_PORT || 8766);
+const STUB_PASSWORD = 'stub-local-only';
+const SESSION_TTL_SECONDS = 7 * 24 * 3600;
+const STEPUP_REQUIRED_FOR = [
+  'PUT /api/v2/admin/binance',
+  'POST /api/v2/admin/binance/test',
+  'PUT /api/v2/admin/crypto/risk',
+  'POST /api/v2/admin/crypto/live',
+  'POST /api/v2/admin/crypto/kill',
+  'POST /api/v2/admin/crypto/flatten',
+  'POST /api/v2/admin/b3/kill',
+];
 
 const health = {
   ok: true,
   bind: `127.0.0.1:${PORT}`,
   readonly: true,
-  auth_required: false,
+  auth_required: true,
   stub: true,
   version: 'stub',
   note: 'STUB LOCAL — exemplos do contrato, não a VPS.',
@@ -449,7 +463,7 @@ const adminState = {
   audit: [],
 };
 
-function saoPauloNow() {
+function saoPauloIso(date = new Date()) {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/Sao_Paulo',
@@ -461,10 +475,14 @@ function saoPauloNow() {
       second: '2-digit',
       hourCycle: 'h23',
     })
-      .formatToParts(new Date())
+      .formatToParts(date)
       .map((part) => [part.type, part.value])
   );
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}-03:00`;
+}
+
+function saoPauloNow() {
+  return saoPauloIso(new Date());
 }
 
 function maskKey(key) {
@@ -543,7 +561,7 @@ function readJsonBody(req) {
 
 function currentSession(req) {
   if (!adminState.session) return null;
-  const got = cookieValue(req, 'triade_admin_session');
+  const got = cookieValue(req, 'triade_session');
   if (!got || got !== adminState.session.id) return null;
   if (Date.now() / 1000 >= adminState.session.expiresAt) {
     adminState.session = null;
@@ -626,13 +644,102 @@ function validateLimits(source) {
   return '';
 }
 
+function sessionPayload(session) {
+  return {
+    ok: true,
+    user: session.user,
+    csrf_token: session.csrf,
+    created_at: session.createdAt,
+    expires_at: session.expiresAt,
+    expires_at_iso: session.expiresAtIso,
+    ttl_seconds: SESSION_TTL_SECONDS,
+    stepup_required_for: STEPUP_REQUIRED_FOR,
+  };
+}
+
+function sessionCookie(id, maxAge) {
+  const value = maxAge === 0 ? '' : encodeURIComponent(id);
+  return `triade_session=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
+function authKind(pathname) {
+  if (pathname === '/api/v2/auth/login' || pathname === '/api/v2/admin/login') return 'login';
+  if (pathname === '/api/v2/auth/logout' || pathname === '/api/v2/admin/logout') return 'logout';
+  if (pathname === '/api/v2/auth/session' || pathname === '/api/v2/admin/session') return 'session';
+  return null;
+}
+
+function readCsrf(req, body) {
+  const header = req.headers['x-csrf-token'];
+  return (Array.isArray(header) ? header[0] : header) || body?.csrf_token || '';
+}
+
+async function handleAuth(req, res, kind) {
+  const method = req.method || 'GET';
+  if (kind === 'session') {
+    if (method !== 'GET') {
+      sendJson(res, 405, { ok: false, error: 'método não permitido', code: 'method_not_allowed' });
+      return;
+    }
+    const session = currentSession(req);
+    if (!session) {
+      sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+      return;
+    }
+    sendJson(res, 200, sessionPayload(session));
+    return;
+  }
+  if (method !== 'POST') {
+    sendJson(res, 405, { ok: false, error: 'método não permitido', code: 'method_not_allowed' });
+    return;
+  }
+  const body = await readJsonBody(req);
+  if (kind === 'login') {
+    const username = typeof body.username === 'string' ? body.username.trim() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!username || password !== STUB_PASSWORD) {
+      pushAudit(req, 'login', false, 'login_failed', null, null);
+      sendJson(res, 401, { ok: false, error: 'usuário, senha ou código 2FA inválidos', code: 'login_failed' });
+      return;
+    }
+    const totp = consumeTotp(body.totp, true);
+    if (!totp.ok) {
+      pushAudit(req, 'login', false, 'login_failed', null, null);
+      sendJson(res, totp.status, { ok: false, error: totp.error, code: totp.code });
+      return;
+    }
+    const expiresAt = Date.now() / 1000 + SESSION_TTL_SECONDS;
+    adminState.session = {
+      id: randomBytes(24).toString('hex'),
+      csrf: randomBytes(24).toString('hex'),
+      user: username,
+      createdAt: saoPauloNow(),
+      expiresAt,
+      expiresAtIso: saoPauloIso(new Date(expiresAt * 1000)),
+    };
+    pushAudit(req, 'login', true, null, null, { user: username });
+    sendJson(res, 200, sessionPayload(adminState.session), sessionCookie(adminState.session.id, SESSION_TTL_SECONDS));
+    return;
+  }
+  const session = currentSession(req);
+  if (!session) {
+    sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+    return;
+  }
+  const csrf = readCsrf(req, body);
+  if (!csrf || csrf !== session.csrf) {
+    sendJson(res, 403, { ok: false, error: 'CSRF ausente ou inválido', code: 'csrf' });
+    return;
+  }
+  pushAudit(req, 'logout', true, null, null, null);
+  adminState.session = null;
+  sendJson(res, 200, { ok: true, message: 'sessão encerrada' }, sessionCookie('', 0));
+}
+
 async function handleAdmin(req, res, url) {
   const path = url.pathname;
   const method = req.method || 'GET';
   const known = {
-    '/api/v2/admin/login': 'POST',
-    '/api/v2/admin/logout': 'POST',
-    '/api/v2/admin/session': 'GET',
     '/api/v2/admin/binance': 'GET',
     '/api/v2/admin/binance/test': 'POST',
     '/api/v2/admin/crypto/risk': 'GET',
@@ -661,54 +768,6 @@ async function handleAdmin(req, res, url) {
   }
 
   const body = needsBody ? await readJsonBody(req) : {};
-
-  if (path === '/api/v2/admin/login') {
-    const username = typeof body.username === 'string' ? body.username.trim() : '';
-    const password = typeof body.password === 'string' ? body.password : '';
-    if (!username || !password) {
-      pushAudit(req, 'login', false, 'login_failed', null, null);
-      sendJson(res, 401, { ok: false, error: 'usuário, senha ou código 2FA inválidos', code: 'login_failed' });
-      return;
-    }
-    const totp = consumeTotp(body.totp, true);
-    if (!totp.ok) {
-      pushAudit(req, 'login', false, 'login_failed', null, null);
-      sendJson(res, totp.status, { ok: false, error: totp.error, code: totp.code });
-      return;
-    }
-    const expiresAt = Date.now() / 1000 + 8 * 3600;
-    adminState.session = {
-      id: randomBytes(24).toString('hex'),
-      csrf: randomBytes(24).toString('hex'),
-      user: username,
-      createdAt: saoPauloNow(),
-      expiresAt,
-    };
-    pushAudit(req, 'login', true, null, null, { user: username });
-    sendJson(
-      res,
-      200,
-      { ok: true, user: username, csrf_token: adminState.session.csrf, expires_at: expiresAt },
-      `triade_admin_session=${encodeURIComponent(adminState.session.id)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`
-    );
-    return;
-  }
-
-  if (path === '/api/v2/admin/session' && method === 'GET') {
-    const session = currentSession(req);
-    if (!session) {
-      sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
-      return;
-    }
-    sendJson(res, 200, {
-      ok: true,
-      user: session.user,
-      csrf_token: session.csrf,
-      created_at: session.createdAt,
-      expires_at: session.expiresAt,
-    });
-    return;
-  }
 
   if (method === 'GET' && path === '/api/v2/admin/binance') {
     if (!currentSession(req)) {
@@ -741,18 +800,6 @@ async function handleAdmin(req, res, url) {
   if (!gate.ok) {
     if (gate.code === 'totp') pushAudit(req, 'stepup_totp', false, gate.error, null, null);
     sendJson(res, gate.status, { ok: false, error: gate.error, code: gate.code });
-    return;
-  }
-
-  if (path === '/api/v2/admin/logout') {
-    pushAudit(req, 'logout', true, null, null, null);
-    adminState.session = null;
-    sendJson(
-      res,
-      200,
-      { ok: true, message: 'sessão encerrada' },
-      'triade_admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
-    );
     return;
   }
 
@@ -984,6 +1031,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const url = new URL(req.url || '/', `http://127.0.0.1:${PORT}`);
+  const kind = authKind(url.pathname);
+  if (kind) {
+    try {
+      await handleAuth(req, res, kind);
+    } catch (err) {
+      if (res.headersSent) return;
+      const statusCode = err?.status === 413 ? 413 : err?.status === 400 ? 400 : 500;
+      const code = statusCode === 413 ? 'payload_too_large' : statusCode === 400 ? 'invalid_json' : 'invalid';
+      const error =
+        statusCode === 413 ? 'corpo maior que 64 KiB' : statusCode === 400 ? 'JSON malformado' : 'falha no stub';
+      sendJson(res, statusCode, { ok: false, error, code });
+    }
+    return;
+  }
+  if (req.method === 'GET' && (url.pathname === '/api/v2/health' || url.pathname === '/api/health')) {
+    sendJson(res, 200, {
+      ...health,
+      auth_required: true,
+      authenticated: Boolean(currentSession(req)),
+    });
+    return;
+  }
+  if (!currentSession(req)) {
+    sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+    return;
+  }
   if (url.pathname.startsWith('/api/v2/admin')) {
     try {
       await handleAdmin(req, res, url);
@@ -1015,13 +1088,24 @@ const server = http.createServer(async (req, res) => {
       readonly: true,
       stub: true,
       server_time: health.server_time,
-      events: ['hello', 'journal', 'status', 'ping'],
+      events: ['hello', 'journal', 'status', 'ping', 'auth'],
     });
     send('status', status);
     const timer = setInterval(() => {
       send('ping', { ts: new Date().toISOString() });
     }, 5000);
-    req.on('close', () => clearInterval(timer));
+    const watch = setInterval(() => {
+      if (!currentSession(req)) {
+        send('auth', { ok: false, code: 'unauthenticated' });
+        clearInterval(timer);
+        clearInterval(watch);
+        res.end();
+      }
+    }, 30000);
+    req.on('close', () => {
+      clearInterval(timer);
+      clearInterval(watch);
+    });
     return;
   }
   const body = route(url);

@@ -1,54 +1,31 @@
-import React, { useState } from 'react';
+import React from 'react';
+import { readApiBase } from '../../api/env';
 import { READONLY_CONTROL_NOTE } from '../../api/readonly';
-import { triadeApi } from '../../api/triade';
 import { AgentId, HealthResponse } from '../../types/triade';
 import { AGENT_NAMES } from '../../utils/format';
 import { StatusBadge } from '../ui/Primitives';
 
 export const SettingsView: React.FC<{
   tunnelEnv: string;
-  apiBaseLabel: string;
   followDefault: boolean;
   telegramFlags: Record<AgentId, boolean | null>;
   health: HealthResponse | null;
-  onChangeTunnelEnv: (env: string) => void;
   onToggleFollowDefault: () => void;
-  onApplyBase: (apiBase: string) => void;
 }> = ({
   tunnelEnv,
-  apiBaseLabel,
   followDefault,
   telegramFlags,
   health,
-  onChangeTunnelEnv,
   onToggleFollowDefault,
-  onApplyBase,
 }) => {
-  const current = triadeApi.getConfig();
-  const [apiBaseInput, setApiBaseInput] = useState(current.apiBase);
-  const [tokenInput, setTokenInput] = useState('');
-  const [feedback, setFeedback] = useState<string | null>(null);
-
-  const apply = (event: React.FormEvent) => {
-    event.preventDefault();
-    const next = apiBaseInput.trim();
-    triadeApi.setConnection(next, tokenInput);
-    setTokenInput('');
-    onChangeTunnelEnv(next ? `túnel · ${next}` : 'mesma origem · /api/v2');
-    onApplyBase(next);
-    setFeedback(
-      next
-        ? `Base da API: ${next}. O token, se informado, fica só na memória deste separador.`
-        : 'Base vazia: os pedidos vão para a mesma origem (/api/v2).'
-    );
-  };
+  const ignoredBase = readApiBase();
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-[22px] font-semibold text-[#e6edf3]">Conexão e preferências</h1>
         <p className="text-xs text-[#8b9bb4] mt-0.5">
-          Preferências deste navegador. A sessão administrativa fica em Administração e não é gravada aqui. {READONLY_CONTROL_NOTE}
+          Preferências deste navegador. A sessão do painel fica só na memória e no cookie HttpOnly. {READONLY_CONTROL_NOTE}
         </p>
       </div>
 
@@ -63,7 +40,7 @@ export const SettingsView: React.FC<{
         <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <div>
             <dt className="text-[#8b9bb4]">Origem em uso</dt>
-            <dd className="font-mono text-[#e6edf3] mt-0.5">{apiBaseLabel || 'mesma origem'}</dd>
+            <dd className="font-mono text-[#e6edf3] mt-0.5">mesma origem · /api/v2</dd>
           </div>
           <div>
             <dt className="text-[#8b9bb4]">Rótulo da sessão</dt>
@@ -79,39 +56,21 @@ export const SettingsView: React.FC<{
             <dt className="text-[#8b9bb4]">Somente leitura / auth</dt>
             <dd className="font-mono text-[#e6edf3] mt-0.5">
               readonly={String(health?.readonly ?? true)} · auth_required=
-              {String(health?.auth_required ?? false)}
+              {String(health?.auth_required ?? true)} · authenticated=
+              {String(health?.authenticated ?? true)}
             </dd>
           </div>
         </dl>
-        <form onSubmit={apply} className="space-y-2">
-          <label className="block text-xs text-[#8b9bb4]">
-            VITE_API_BASE (vazio = mesma origem; túnel = http://127.0.0.1:8765)
-            <input
-              value={apiBaseInput}
-              onChange={(e) => setApiBaseInput(e.target.value)}
-              placeholder="http://127.0.0.1:8765"
-              className="mt-1 w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-2 font-mono text-xs text-[#e6edf3]"
-            />
-          </label>
-          <label className="block text-xs text-[#8b9bb4]">
-            Bearer opcional (não é exigido; não é gravado)
-            <input
-              type="password"
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              autoComplete="off"
-              placeholder="deixe vazio"
-              className="mt-1 w-full rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-2 font-mono text-xs text-[#e6edf3]"
-            />
-          </label>
-          <button
-            type="submit"
-            className="rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs font-medium text-[#e6edf3]"
-          >
-            Aplicar base
-          </button>
-          {feedback && <p className="text-xs text-[#8b9bb4]">{feedback}</p>}
-        </form>
+        <p className="text-xs leading-relaxed text-[#8b9bb4]">
+          Os pedidos usam URL relativa e <span className="font-mono">credentials: same-origin</span>.
+          O cookie <span className="font-mono">triade_session</span> não sai desta origem. Para o túnel
+          local, publique a API no mesmo host com o proxy do Vite (<span className="font-mono">VITE_DEV_PROXY</span>).
+        </p>
+        {ignoredBase ? (
+          <p className="text-xs leading-relaxed text-[#d29922]">
+            VITE_API_BASE={ignoredBase} está definido e é ignorado. Uma origem diferente não envia o cookie.
+          </p>
+        ) : null}
         <pre className="overflow-x-auto rounded-lg border border-[#30363d] bg-[#0b0f14] p-3 text-[11px] text-[#8b9bb4]">{`ssh -L 8765:127.0.0.1:8765 -L 5971:127.0.0.1:5971 -L 5972:127.0.0.1:5972 user@<vps>`}</pre>
       </section>
 
@@ -156,8 +115,8 @@ export const SettingsView: React.FC<{
       <section className="rounded-xl border border-[#30363d] bg-[#161b22] p-4 text-xs text-[#8b9bb4] space-y-1">
         <p>Indisponível neste backend (estado vazio, sem dados de exemplo):</p>
         <ul className="list-disc pl-4 space-y-0.5">
-          <li>usuários, papéis e 2FA</li>
-          <li>emissão e revogação de tokens</li>
+          <li>cadastro de outros usuários neste painel</li>
+          <li>emissão de token Bearer</li>
           <li>trilha de auditoria (var/dashboard/audit.jsonl ainda não existe)</li>
           <li>acknowledgement de alertas no servidor</li>
         </ul>

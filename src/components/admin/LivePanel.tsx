@@ -65,7 +65,8 @@ export function LivePanel({
           setError(formatAdminError(err));
           await onChanged();
         }
-      }
+      },
+      { method: 'POST', path: '/api/v2/admin/crypto/live' }
     );
   };
 
