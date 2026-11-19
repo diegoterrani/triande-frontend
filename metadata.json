@@ -1,0 +1,6 @@
+{
+  "name": "TRIADE — Super Painel de Gerenciamento dos Tradings",
+  "description": "Interface de comando e consciência situacional para os três agentes independentes de day trade do sistema TRIADE (B3, NASDAQ e Cripto).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
