@@ -56,7 +56,7 @@ export function BinancePanel({
         setNotice('A chave e o segredo foram apagados deste formulário. Cole de novo com um código 2FA novo.');
         setError(formatAdminError(err));
       }
-    });
+    }, { method: 'PUT', path: '/api/v2/admin/binance' });
   };
 
   const runTest = () => {
@@ -71,7 +71,7 @@ export function BinancePanel({
         setError(formatAdminError(err));
         await onChanged();
       }
-    });
+    }, { method: 'POST', path: '/api/v2/admin/binance/test' });
   };
 
   return (

@@ -296,6 +296,7 @@ export function mapHealth(raw: unknown): HealthResponse {
     uptime_seconds: num(record.uptime_seconds) ?? undefined,
     version: str(record.version) ?? str(git?.commit_short) ?? undefined,
     auth_required: bool(record.auth_required) ?? undefined,
+    authenticated: bool(record.authenticated) ?? undefined,
     server_time: str(record.server_time) ?? undefined,
     timezone: str(record.timezone) ?? undefined,
     stub: bool(record.stub) ?? undefined,

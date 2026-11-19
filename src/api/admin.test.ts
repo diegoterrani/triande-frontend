@@ -2,8 +2,20 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { once } from 'node:events';
-import { describe, it } from 'node:test';
+import { beforeEach, describe, it } from 'node:test';
 import { AdminApiClient } from './admin.ts';
+import { setApiFetchForTests } from './http.ts';
+import {
+  actionNeedsStepUp,
+  getAuthSession,
+  isCredentialFailure,
+  LOCKOUT_WARNING,
+  LOGIN_FAILED_MESSAGE,
+  resetAuthStateForTests,
+  showLockoutWarning,
+  subscribeAuth,
+} from './sessionStore.ts';
+import { setStreamSourceFactoryForTests, triadeApi } from './triade.ts';
 import {
   AdminApiError,
   confirmationMatches,
@@ -159,7 +171,28 @@ describe('redactAuditValue', () => {
   });
 });
 
-describe('AdminApiClient', () => {
+describe('session helpers', () => {
+  it('asks for a fresh code only on the listed writes', () => {
+    assert.equal(actionNeedsStepUp('PUT', '/api/v2/admin/binance', ['PUT /api/v2/admin/binance']), true);
+    assert.equal(actionNeedsStepUp('GET', '/api/v2/admin/binance', ['PUT /api/v2/admin/binance']), false);
+    assert.equal(actionNeedsStepUp('POST', '/api/v2/auth/logout', ['POST /api/v2/auth/logout']), false);
+    assert.equal(actionNeedsStepUp('POST', '/api/v2/admin/crypto/live', null), true);
+    assert.equal(isCredentialFailure(401, 'login_failed'), true);
+    assert.equal(isCredentialFailure(401, 'unauthenticated'), false);
+    assert.equal(LOGIN_FAILED_MESSAGE, 'usuário, senha ou código 2FA inválidos');
+    assert.equal(showLockoutWarning(2), false);
+    assert.equal(showLockoutWarning(3), true);
+    assert.match(LOCKOUT_WARNING, /1 hora/);
+  });
+});
+
+describe('AdminApiClient', { concurrency: 1 }, () => {
+  beforeEach(() => {
+    resetAuthStateForTests();
+    setApiFetchForTests(null);
+    setStreamSourceFactoryForTests(null);
+  });
+
   it('logs in with credentials and keeps CSRF only in memory', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     let storageWrites = 0;
@@ -193,8 +226,12 @@ describe('AdminApiClient', () => {
       assert.equal(client.csrfReady, true);
       assert.equal(client.sessionSnapshot?.user, 'diego');
       assert.equal(storageWrites, 0);
+      assert.equal(JSON.stringify(getAuthSession()).includes('segredo'), false);
+      assert.equal(JSON.stringify(getAuthSession()).includes('123456'), false);
       const init = calls[0].init;
-      assert.equal(init.credentials, 'include');
+      assert.equal(init.credentials, 'same-origin');
+      assert.equal(init.cache, 'no-store');
+      assert.equal(calls[0].url, '/api/v2/auth/login');
       assert.equal(init.method, 'POST');
       const headers = init.headers as Record<string, string>;
       assert.equal(headers['X-CSRF-Token'], undefined);
@@ -228,7 +265,8 @@ describe('AdminApiClient', () => {
     const headers = init.headers as Record<string, string>;
     assert.equal(headers['X-CSRF-Token'], 'csrf-1');
     assert.equal(headers['X-TOTP'], '222222');
-    assert.equal(init.credentials, 'include');
+    assert.equal(init.credentials, 'same-origin');
+    assert.equal(init.cache, 'no-store');
     assert.deepEqual(JSON.parse(String(init.body)), {
       api_key: 'api-key-ABCD',
       api_secret: 'api-secret-value',
@@ -264,7 +302,9 @@ describe('AdminApiClient', () => {
     const headers = calls[1].init.headers as Record<string, string>;
     assert.equal(headers['X-CSRF-Token'], undefined);
     assert.equal(headers['X-TOTP'], undefined);
-    assert.equal(calls[1].init.credentials, 'include');
+    assert.equal(calls[1].url, '/api/v2/auth/session');
+    assert.equal(calls[1].init.credentials, 'same-origin');
+    assert.equal(calls[1].init.cache, 'no-store');
     assert.equal(calls[1].init.body, undefined);
   });
 
@@ -342,12 +382,161 @@ describe('AdminApiClient', () => {
     };
     const client = new AdminApiClient({ apiBase: 'http://stub', fetchImpl });
     await client.login('diego', 'segredo', '111111');
-    await assert.rejects(() => client.logout('12345'), (err: unknown) => {
+    await assert.rejects(() => client.putBinance('key', 'secret', '12345'), (err: unknown) => {
       assert.ok(err instanceof AdminApiError);
       assert.equal(err.code, 'totp');
       return true;
     });
     assert.equal(calls, 1);
+  });
+
+  it('logs out with CSRF and an empty body, without TOTP', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      if (String(input).endsWith('/login')) {
+        return jsonResponse(200, { ok: true, user: 'diego', csrf_token: 'csrf-1', expires_at: 4_000_000_000 });
+      }
+      return jsonResponse(200, { ok: true, message: 'sessão encerrada' });
+    };
+    const client = new AdminApiClient({ fetchImpl });
+    await client.login('diego', 'segredo', '111111');
+    await client.logout();
+    const init = calls[1].init;
+    const headers = init.headers as Record<string, string>;
+    assert.equal(calls[1].url, '/api/v2/auth/logout');
+    assert.equal(headers['X-CSRF-Token'], 'csrf-1');
+    assert.equal(headers['X-TOTP'], undefined);
+    assert.equal(headers.Authorization, undefined);
+    assert.equal(init.credentials, 'same-origin');
+    assert.equal(init.cache, 'no-store');
+    assert.deepEqual(JSON.parse(String(init.body)), {});
+    assert.equal(client.sessionSnapshot, null);
+  });
+
+  it('refetches the session and retries one write after 403 csrf', async () => {
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith('/login')) {
+        return jsonResponse(200, {
+          ok: true,
+          user: 'diego',
+          csrf_token: 'csrf-old',
+          expires_at: 4_000_000_000,
+          stepup_required_for: ['PUT /api/v2/admin/binance'],
+        });
+      }
+      if (url.endsWith('/auth/session')) {
+        return jsonResponse(200, {
+          ok: true,
+          user: 'diego',
+          csrf_token: 'csrf-new',
+          expires_at: 4_000_000_000,
+          stepup_required_for: ['PUT /api/v2/admin/binance'],
+        });
+      }
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (headers['X-CSRF-Token'] === 'csrf-old') {
+        return jsonResponse(403, { ok: false, error: 'CSRF ausente ou inválido', code: 'csrf' });
+      }
+      assert.equal(headers['X-CSRF-Token'], 'csrf-new');
+      assert.equal(headers['X-TOTP'], '222222');
+      return jsonResponse(200, { ok: true, configured: true, api_key_masked: '••••ABCD', tested: false });
+    };
+    const client = new AdminApiClient({ fetchImpl });
+    await client.login('diego', 'segredo', '111111');
+    await client.putBinance('api-key', 'api-secret', '222222');
+    assert.deepEqual(calls, [
+      '/api/v2/auth/login',
+      '/api/v2/admin/binance',
+      '/api/v2/auth/session',
+      '/api/v2/admin/binance',
+    ]);
+    assert.equal(JSON.stringify(getAuthSession()).includes('api-secret'), false);
+  });
+
+  it('moves to the logged-out state once when several calls are 401', async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).endsWith('/login')) {
+        return jsonResponse(200, { ok: true, user: 'diego', csrf_token: 'csrf-1', expires_at: 4_000_000_000 });
+      }
+      return jsonResponse(401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+    };
+    const client = new AdminApiClient({ fetchImpl });
+    await client.login('diego', 'segredo', '111111');
+    let signedOut = 0;
+    const unsubscribe = subscribeAuth((next) => {
+      if (next === null) signedOut += 1;
+    });
+    await Promise.allSettled([client.getBinance(), client.getRisk(), client.getAudit()]);
+    unsubscribe();
+    assert.equal(signedOut, 1);
+    assert.equal(client.csrfReady, false);
+  });
+
+  it('closes the stream on auth and does not reconnect after a 401 probe', async () => {
+    const opened: string[] = [];
+    class FakeSource {
+      closed = false;
+      onerror: (() => void) | null = null;
+      private listeners = new Map<string, Array<(event: MessageEvent) => void>>();
+      constructor(readonly url: string) {
+        opened.push(url);
+      }
+      addEventListener(type: string, listener: (event: MessageEvent) => void) {
+        const list = this.listeners.get(type) ?? [];
+        list.push(listener);
+        this.listeners.set(type, list);
+      }
+      close() {
+        this.closed = true;
+      }
+      emit(type: string) {
+        const event = { data: JSON.stringify({ ok: false, code: 'unauthenticated' }) } as MessageEvent;
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    let source: FakeSource | null = null;
+    setStreamSourceFactoryForTests((url) => {
+      source = new FakeSource(url);
+      return source;
+    });
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).endsWith('/login')) {
+        return jsonResponse(200, { ok: true, user: 'diego', csrf_token: 'csrf-1', expires_at: 4_000_000_000 });
+      }
+      return jsonResponse(401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+    };
+    const client = new AdminApiClient({ fetchImpl });
+    await client.login('diego', 'segredo', '111111');
+    setApiFetchForTests(fetchImpl);
+    const stop = triadeApi.subscribeStream({
+      onConnectionChange() {},
+      onJournalEvent() {},
+      onStatusTick() {},
+    });
+    assert.deepEqual(opened, ['/api/v2/stream?agent=all']);
+    source!.emit('auth');
+    assert.equal(source!.closed, true);
+    assert.equal(getAuthSession(), null);
+    assert.equal(opened.length, 1);
+    stop();
+
+    await client.login('diego', 'segredo', '222222');
+    opened.length = 0;
+    const stopAgain = triadeApi.subscribeStream({
+      onConnectionChange() {},
+      onJournalEvent() {},
+      onStatusTick() {},
+    });
+    source!.onerror?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(opened.length, 1);
+    assert.equal(getAuthSession(), null);
+    assert.equal(source!.closed, true);
+    stopAgain();
   });
 });
 
@@ -383,14 +572,16 @@ describe('admin stub flow', () => {
     });
     const base = `http://127.0.0.1:${port}`;
     let cookie = '';
+    let lastCookies: string[] = [];
     const call = async (path: string, init: RequestInit = {}) => {
       const headers = new Headers(init.headers);
       if (cookie) headers.set('cookie', cookie);
       const response = await fetch(`${base}${path}`, { ...init, headers });
       const setCookies = typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+      lastCookies = setCookies;
       for (const entry of setCookies) {
         const pair = entry.split(';')[0] ?? '';
-        if (!pair.startsWith('triade_admin_session=')) continue;
+        if (!pair.startsWith('triade_session=')) continue;
         cookie = /Max-Age=0/i.test(entry) || pair.endsWith('=') ? '' : pair;
       }
       const json = (await response.json()) as Record<string, unknown>;
@@ -406,10 +597,36 @@ describe('admin stub flow', () => {
 
       const health = await call('/api/v2/health');
       assert.equal(health.json.stub, true);
-      const readonlyPost = await call('/api/v2/status', { method: 'POST', body: '{}' });
-      assert.equal(readonlyPost.status, 405);
+      assert.equal(health.json.auth_required, true);
+      assert.equal(health.json.authenticated, false);
+      const hidden = await call('/api/v2/status');
+      assert.equal(hidden.status, 401);
+      assert.equal(hidden.json.code, 'unauthenticated');
+      const stream = await call('/api/v2/stream?agent=all');
+      assert.equal(stream.status, 401);
+      assert.equal(stream.json.code, 'unauthenticated');
 
-      const bad = await call('/api/v2/admin/login', {
+      const wrongPassword = await call('/api/v2/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'diego', password: 'errada', totp: '101010' }),
+      });
+      assert.equal(wrongPassword.status, 401);
+      assert.equal(wrongPassword.json.code, 'login_failed');
+      const sameCode = await call('/api/v2/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'diego', password: 'stub-local-only', totp: '101010' }),
+      });
+      assert.equal(sameCode.status, 200);
+      await call('/api/v2/auth/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': String(sameCode.json.csrf_token) },
+        body: '{}',
+      });
+      assert.equal(cookie, '');
+
+      const bad = await call('/api/v2/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'diego', password: 'x', totp: '12' }),
@@ -417,15 +634,26 @@ describe('admin stub flow', () => {
       assert.equal(bad.status, 401);
       assert.equal(bad.json.code, 'login_failed');
 
-      const login = await call('/api/v2/admin/login', {
+      const login = await call('/api/v2/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'diego', password: 'stub-local-only', totp: '111111' }),
       });
       assert.equal(login.status, 200);
       assert.equal(typeof login.json.csrf_token, 'string');
-      assert.ok(cookie.includes('triade_admin_session='));
+      assert.equal(login.json.ttl_seconds, 604800);
+      assert.ok((login.json.stepup_required_for as string[]).includes('PUT /api/v2/admin/binance'));
+      assert.ok(cookie.includes('triade_session='));
+      assert.match(lastCookies.join(';'), /Max-Age=604800/);
+      assert.match(lastCookies.join(';'), /HttpOnly/);
+      assert.match(lastCookies.join(';'), /SameSite=Strict/);
       const csrf = String(login.json.csrf_token);
+      const visible = await call('/api/v2/status');
+      assert.equal(visible.status, 200);
+      const healthIn = await call('/api/v2/health');
+      assert.equal(healthIn.json.authenticated, true);
+      const readonlyPost = await call('/api/v2/status', { method: 'POST', body: '{}' });
+      assert.equal(readonlyPost.status, 405);
 
       const reuse = await call('/api/v2/admin/binance/test', {
         method: 'POST',
@@ -569,16 +797,26 @@ describe('admin stub flow', () => {
       assert.equal(serialized.includes('outro-segredo'), false);
       assert.match(serialized, /••••ABCD/);
 
-      const logout = await call('/api/v2/admin/logout', {
+      const logout = await call('/api/v2/auth/logout', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf, 'X-TOTP': '161616' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
         body: '{}',
       });
       assert.equal(logout.status, 200);
       assert.equal(cookie, '');
-      const after = await call('/api/v2/admin/session');
+      const after = await call('/api/v2/auth/session');
       assert.equal(after.status, 401);
       assert.equal(after.json.code, 'unauthenticated');
+      const alias = await call('/api/v2/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'diego', password: 'stub-local-only', totp: '171717' }),
+      });
+      assert.equal(alias.status, 200);
+      assert.ok(cookie.includes('triade_session='));
+      const aliasSession = await call('/api/v2/admin/session');
+      assert.equal(aliasSession.status, 200);
+      assert.equal(aliasSession.json.user, 'diego');
     } finally {
       child.kill('SIGTERM');
       await once(child, 'exit').catch(() => undefined);

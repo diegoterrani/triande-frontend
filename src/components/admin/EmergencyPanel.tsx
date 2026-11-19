@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { adminApi } from '../../api/admin';
 import { AdminApiError, formatAdminError } from '../../api/adminProtocol';
-import { AdminWrite, Note, ServerError } from './adminUi';
+import { AdminWrite, Note, ServerError, StepUpAction } from './adminUi';
 
 function ActionCard({
   title,
@@ -64,6 +64,7 @@ export function EmergencyPanel({
 
   const run = (
     purpose: string,
+    action: StepUpAction,
     work: (totp: string) => Promise<{ summary: string }>
   ) => {
     setError(null);
@@ -76,7 +77,7 @@ export function EmergencyPanel({
         if (err instanceof AdminApiError && (err.code === 'totp' || err.unauthenticated)) throw err;
         setError(formatAdminError(err));
       }
-    });
+    }, action);
   };
 
   return (
@@ -102,7 +103,7 @@ export function EmergencyPanel({
           buttonLabel="Gravar kill da cripto"
           busy={busy}
           onRun={() =>
-            run('Gravar var/crypto/KILL. Nenhuma ordem é enviada.', async (totp) => {
+            run('Gravar var/crypto/KILL. Nenhuma ordem é enviada.', { method: 'POST', path: '/api/v2/admin/crypto/kill' }, async (totp) => {
               const result = await adminApi.killCrypto(totp);
               return { summary: `Kill da cripto gravado em ${result.kill_flag}.` };
             })
@@ -116,7 +117,7 @@ export function EmergencyPanel({
           buttonLabel="Gravar flatten da cripto"
           busy={busy}
           onRun={() =>
-            run('Gravar o KILL da cripto sem chamar a corretora.', async (totp) => {
+            run('Gravar o KILL da cripto sem chamar a corretora.', { method: 'POST', path: '/api/v2/admin/crypto/flatten' }, async (totp) => {
               const result = await adminApi.flattenCrypto(totp);
               const note = result.note ? ` ${result.note}` : '';
               return {
@@ -133,7 +134,7 @@ export function EmergencyPanel({
           buttonLabel="Gravar kill da B3"
           busy={busy}
           onRun={() =>
-            run('Gravar var/b3/KILL. Não há flatten da conta B3 por este painel.', async (totp) => {
+            run('Gravar var/b3/KILL. Não há flatten da conta B3 por este painel.', { method: 'POST', path: '/api/v2/admin/b3/kill' }, async (totp) => {
               const result = await adminApi.killB3(totp);
               return { summary: `Kill da B3 gravado em ${result.kill_flag}. Nenhum flatten foi pedido.` };
             })

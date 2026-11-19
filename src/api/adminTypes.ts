@@ -4,6 +4,9 @@ export interface AdminSession {
   csrf_token: string;
   expires_at: number;
   created_at?: string;
+  expires_at_iso?: string;
+  ttl_seconds?: number;
+  stepup_required_for?: string[];
 }
 
 export interface BinanceTestResult {

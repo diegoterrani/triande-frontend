@@ -98,14 +98,28 @@ const ROUTE_BREADCRUMBS: Record<RouteKey, string> = {
   settings: 'Configurações e usuários',
 };
 
+function formatSessionExpiry(expiresAt: number): string {
+  const date = new Date(expiresAt * 1000);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export const AppShell: React.FC<{
   route: RouteKey;
   onNavigate: (route: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => void;
   status: StatusResponse | null;
   connection: ConnectionState;
   role: UserRole;
-  operatorName: string;
-  adminUser: string | null;
+  sessionUser: string;
+  sessionExpiresAt: number;
+  onLogout: () => void;
+  logoutBusy: boolean;
   adminOpen: boolean;
   onOpenAdmin: () => void;
   tunnelEnv: string;
@@ -122,8 +136,10 @@ export const AppShell: React.FC<{
   status,
   connection,
   role,
-  operatorName,
-  adminUser,
+  sessionUser,
+  sessionExpiresAt,
+  onLogout,
+  logoutBusy,
   adminOpen,
   onOpenAdmin,
   tunnelEnv,
@@ -357,9 +373,9 @@ export const AppShell: React.FC<{
 
           <div className="border-t border-[#30363d] p-3 hidden xl:block">
             <div className="text-xs min-w-0">
-              <div className="font-medium text-[#e6edf3] truncate">{operatorName}</div>
+              <div className="font-medium text-[#e6edf3] truncate">{sessionUser}</div>
               <div className="text-[11px] text-[#8b9bb4]">
-                {adminUser ? 'sessão admin ativa' : 'sessão admin ausente'}
+                sessão até {formatSessionExpiry(sessionExpiresAt)}
               </div>
             </div>
           </div>
@@ -377,7 +393,7 @@ export const AppShell: React.FC<{
             </div>
 
             {/* Compact 3-agent indicators */}
-            <div className="hidden lg:flex items-center gap-2">
+            <div className="hidden 2xl:flex items-center gap-2">
               {agentsList.map((ag) => (
                 <button
                   key={ag.agent}
@@ -402,7 +418,7 @@ export const AppShell: React.FC<{
 
             <div className="flex items-center gap-2.5 shrink-0">
               {/* Clocks */}
-              <div className="hidden sm:flex flex-col items-end font-mono tabular-nums leading-tight">
+              <div className="hidden 2xl:flex flex-col items-end font-mono tabular-nums leading-tight">
                 <span className="text-xs text-[#e6edf3]">
                   {formatBrasiliaTime(nowIso)}{' '}
                   <span className="text-[10px] text-[#8b9bb4]">BRT</span>
@@ -447,6 +463,26 @@ export const AppShell: React.FC<{
                 </kbd>
               </button>
 
+              <div className="flex items-center gap-2 rounded-lg border border-[#30363d] bg-[#161b22] px-2 py-1">
+                <div className="leading-tight text-right">
+                  <div className="max-w-[7rem] truncate text-xs font-medium text-[#e6edf3]">{sessionUser}</div>
+                  <div
+                    className="whitespace-nowrap font-mono text-[10px] text-[#8b9bb4]"
+                    title={`Sessão expira em ${formatSessionExpiry(sessionExpiresAt)} BRT`}
+                  >
+                    até {formatSessionExpiry(sessionExpiresAt)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  disabled={logoutBusy}
+                  className="rounded-md border border-[#30363d] px-2 py-1 text-xs font-semibold text-[#e6edf3] hover:bg-[#1c2330] disabled:opacity-45"
+                >
+                  {logoutBusy ? 'Saindo…' : 'Sair'}
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={onOpenAdmin}
@@ -454,7 +490,7 @@ export const AppShell: React.FC<{
                 aria-expanded={adminOpen}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#7aa2f7]/50 bg-[#7aa2f7]/10 px-2.5 py-1.5 text-xs font-semibold text-[#7aa2f7] hover:bg-[#7aa2f7]/20 whitespace-nowrap"
               >
-                <span className={`h-1.5 w-1.5 rounded-full ${adminUser ? 'bg-[#3fb950]' : 'bg-[#8b9bb4]'}`} />
+                <span className="h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
                 Administração
               </button>
 
@@ -464,7 +500,7 @@ export const AppShell: React.FC<{
                 onClick={onOpenKillAll}
                 aria-label="Kill all indisponível: backend somente leitura"
                 title="Somente leitura: POST /api/v2/kill-all responde 405. Nada é enviado."
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[#f85149]/40 px-3 py-1.5 text-xs font-semibold text-white opacity-45 cursor-not-allowed whitespace-nowrap shrink-0"
+                className="hidden sm:inline-flex items-center gap-1.5 rounded-lg bg-[#f85149]/40 px-3 py-1.5 text-xs font-semibold text-white opacity-45 cursor-not-allowed whitespace-nowrap shrink-0"
               >
                 <OctagonX className="h-3.5 w-3.5" />
                 <span>Kill all</span>
@@ -565,7 +601,7 @@ export const AppShell: React.FC<{
               })}
             </div>
             <div className="border-t border-[#30363d] p-3 text-xs text-[#8b9bb4]">
-              {operatorName} · {adminUser ? 'sessão admin ativa' : 'sessão admin ausente'}
+              {sessionUser} · até {formatSessionExpiry(sessionExpiresAt)}
             </div>
           </div>
         </div>

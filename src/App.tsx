@@ -4,9 +4,12 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { annotateAlertModes, triadeApi } from './api/triade';
+import { logout, restoreSession } from './api/auth';
+import { annotateAlertModes, TriadeApiError, triadeApi } from './api/triade';
 import { LiveRevisionContext } from './api/liveContext';
+import { authEpoch, AuthSession, markUnauthenticated, subscribeAuth } from './api/sessionStore';
 import { AdminModal } from './components/admin/AdminModal';
+import { LoginScreen, SessionGate } from './components/auth/LoginScreen';
 import { AppShell, ToastMessage } from './components/layout/AppShell';
 import { AgentDetailView } from './components/views/AgentDetailView';
 import { AlertsView } from './components/views/AlertsView';
@@ -96,11 +99,11 @@ export default function App() {
     initialParsed.clientOrderId
   );
 
-  const [tunnelEnv, setTunnelEnv] = useState<string>(
-    triadeApi.isCrossOrigin()
-      ? `túnel · ${triadeApi.getConfig().apiBase}`
-      : 'mesma origem · /api/v2'
-  );
+  const tunnelEnv = 'mesma origem · /api/v2';
+  const [ready, setReady] = useState(false);
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [logoutBusy, setLogoutBusy] = useState(false);
 
   useEffect(() => {
     const sync = () => {
@@ -115,7 +118,6 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>('reconnecting');
   const [followLive, setFollowLive] = useState<boolean>(true);
   const [revision, setRevision] = useState(0);
-  const [streamEpoch, setStreamEpoch] = useState(0);
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -134,7 +136,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [adminOpen, setAdminOpen] = useState(false);
-  const [adminUser, setAdminUser] = useState<string | null>(null);
+  const authed = Boolean(session);
 
   const pushToast = useCallback((t: Omit<ToastMessage, 'id'>) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -145,6 +147,7 @@ export default function App() {
   }, []);
 
   const fetchAll = useCallback(async () => {
+    const stamp = authEpoch();
     try {
       setError(null);
       const [healthResult, statusPack, timeline, analyst, alerts, audit, reports, configs, flags] =
@@ -159,6 +162,7 @@ export default function App() {
           triadeApi.getStrategies().catch(() => null),
           triadeApi.getTelegramFlags().catch(() => null),
         ]);
+      if (stamp !== authEpoch()) return;
       setHealth(healthResult);
       setStatus(statusPack.status);
       setInfra(statusPack.infra);
@@ -176,20 +180,53 @@ export default function App() {
       setConnection((prev) => (prev === 'sse' ? 'sse' : 'polling'));
       setRevision((n) => n + 1);
     } catch (err) {
+      if (stamp !== authEpoch()) return;
+      if (err instanceof TriadeApiError && err.code === 'unauthenticated') return;
       const msg = err instanceof Error ? err.message : 'Sem conexão com o VPS';
       setError(msg);
       setConnection('offline');
     } finally {
-      setLoading(false);
+      if (stamp === authEpoch()) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+    let cancelled = false;
+    const unsubscribe = subscribeAuth((next) => {
+      if (!cancelled) setSession(next);
+    });
+    restoreSession()
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setBootError(err instanceof Error ? err.message : 'sem conexão com o VPS');
+      })
+      .finally(() => {
+        if (!cancelled) setReady(true);
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
-    if (!followLive) return;
+    if (!session?.expiresAt) return;
+    const delay = Math.max(0, session.expiresAt * 1000 - Date.now());
+    const id = window.setTimeout(() => {
+      void restoreSession().catch(() => {
+        markUnauthenticated();
+      });
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [session?.expiresAt]);
+
+  useEffect(() => {
+    if (!authed) return;
+    void fetchAll();
+  }, [authed, fetchAll]);
+
+  useEffect(() => {
+    if (!authed || !followLive) return;
     const unsub = triadeApi.subscribeStream({
       onConnectionChange: (next) => setConnection(next),
       onJournalEvent: () => {
@@ -200,7 +237,7 @@ export default function App() {
       },
     });
     return unsub;
-  }, [followLive, fetchAll, streamEpoch]);
+  }, [authed, followLive, fetchAll]);
 
   const handleNavigate = useCallback(
     (nextRoute: RouteKey, query?: { agent?: AgentId; clientOrderId?: string }) => {
@@ -238,10 +275,23 @@ export default function App() {
     []
   );
 
+  const handleLogout = useCallback(() => {
+    if (logoutBusy) return;
+    setLogoutBusy(true);
+    void logout()
+      .catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : 'Não foi possível encerrar a sessão.';
+        pushToast({ tone: 'bad', title: 'Não foi possível sair', detail });
+      })
+      .finally(() => setLogoutBusy(false));
+  }, [logoutBusy, pushToast]);
+
+  if (!ready) return <SessionGate label="Consultando a sessão…" />;
+  if (!session) return <LoginScreen bootError={bootError} />;
+
   const offline = connection === 'offline';
   const alerts: AlertItem[] = alertsPayload.alerts;
   const unackedAlertsCount = alerts.filter((a) => !a.acknowledged).length;
-  const apiBaseLabel = triadeApi.getConfig().apiBase || 'mesma origem';
 
   return (
     <LiveRevisionContext.Provider value={revision}>
@@ -251,8 +301,10 @@ export default function App() {
         status={status}
         connection={connection}
         role="auditor"
-        operatorName={adminUser ?? 'sem sessão admin'}
-        adminUser={adminUser}
+        sessionUser={session.user}
+        sessionExpiresAt={session.expiresAt}
+        onLogout={handleLogout}
+        logoutBusy={logoutBusy}
         adminOpen={adminOpen}
         onOpenAdmin={() => setAdminOpen(true)}
         tunnelEnv={tunnelEnv}
@@ -361,26 +413,18 @@ export default function App() {
         {route === 'settings' && (
           <SettingsView
             tunnelEnv={tunnelEnv}
-            apiBaseLabel={apiBaseLabel}
             followDefault={followLive}
             telegramFlags={telegramFlags}
             health={health}
-            onChangeTunnelEnv={setTunnelEnv}
             onToggleFollowDefault={() => setFollowLive((f) => !f)}
-            onApplyBase={(apiBase) => {
-              triadeApi.setConnection(apiBase);
-              setTunnelEnv(apiBase ? `túnel · ${apiBase}` : 'mesma origem · /api/v2');
-              setStreamEpoch((n) => n + 1);
-              fetchAll();
-            }}
           />
         )}
       </AppShell>
       {adminOpen && (
         <AdminModal
           stub={health?.stub === true}
+          session={session}
           onClose={() => setAdminOpen(false)}
-          onUser={setAdminUser}
         />
       )}
     </LiveRevisionContext.Provider>

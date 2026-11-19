@@ -1,4 +1,6 @@
-import { readApiBase } from './env';
+import { probeSession } from './auth';
+import { ApiError, api } from './http';
+import { markUnauthenticated } from './sessionStore';
 import {
   annotateAlertModes,
   attachInfra,
@@ -41,93 +43,56 @@ import {
 
 export interface TriadeClientConfig {
   apiBase: string;
-  token: string;
 }
-
-const ENV_TOKEN = (import.meta.env.VITE_TRIADE_TOKEN as string | undefined)?.trim() || '';
 
 export class TriadeApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code: string | null;
+  constructor(message: string, status: number, code: string | null = null) {
     super(message);
     this.name = 'TriadeApiError';
     this.status = status;
+    this.code = code;
   }
+}
+
+interface StreamSource {
+  close: () => void;
+  addEventListener: (type: string, listener: (event: MessageEvent) => void) => void;
+  onerror: ((this: StreamSource, ev?: unknown) => void) | null;
+}
+
+let streamSourceFactory: ((url: string) => StreamSource) | null = null;
+
+export function setStreamSourceFactoryForTests(factory: ((url: string) => StreamSource) | null): void {
+  streamSourceFactory = factory;
 }
 
 /**
  * Typed client for the read-only TRIADE dashboard API (`/api/v2`).
- * Empty base URL means same-origin (the SPA served under `/app`).
- * Dev over the SSH tunnel uses `VITE_API_BASE=http://127.0.0.1:8765`.
+ * Every call is a relative URL on the same origin. The session cookie travels
+ * with the browser; this client never sends Authorization.
  */
 export class TriadeApiClient {
-  private apiBase: string = readApiBase();
-  private token: string = ENV_TOKEN;
   private localAck = new Set<string>();
   private agentModes: Partial<Record<AgentId, 'live' | 'paper'>> = {};
 
-  /** True when requests go to an explicit origin (tunnel), not same-origin `/app`. */
+  /** Requests are always same-origin. The session cookie is SameSite=Strict. */
   isCrossOrigin(): boolean {
-    return Boolean(this.apiBase);
+    return false;
   }
 
   getConfig(): TriadeClientConfig {
-    return {
-      apiBase: this.apiBase,
-      token: this.token ? '••••••••' : '',
-    };
+    return { apiBase: '' };
   }
 
-  setConnection(apiBase: string, token?: string): void {
-    this.apiBase = apiBase.trim().replace(/\/+$/, '');
-    if (token !== undefined && token.trim()) {
-      this.token = token.trim();
-    }
-  }
-
-  private async requestJson<T>(path: string, init?: RequestInit, timeoutMs = 20000): Promise<T> {
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      ...(init?.headers as Record<string, string> | undefined),
-    };
-    if (init?.body) headers['Content-Type'] = 'application/json';
-    if (this.token) headers.Authorization = `Bearer ${this.token}`;
-
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  private async requestJson<T>(path: string): Promise<T> {
     try {
-      const res = await fetch(`${this.apiBase}${path}`, {
-        ...init,
-        headers,
-        signal: controller.signal,
-        cache: 'no-store',
-      });
-      const json = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-      if (!res.ok) {
-        const message =
-          typeof json?.error === 'string' && json.error
-            ? json.error
-            : `Erro HTTP ${res.status}`;
-        throw new TriadeApiError(message, res.status);
-      }
-      return json as T;
+      return await api<T>(path);
     } catch (err) {
       if (err instanceof TriadeApiError) throw err;
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        throw new TriadeApiError(
-          'sem conexão com o VPS (túnel 127.0.0.1:8765 indisponível ou tempo esgotado)',
-          0
-        );
-      }
-      const message = err instanceof Error ? err.message : 'sem conexão com o VPS';
-      throw new TriadeApiError(
-        message === 'Failed to fetch'
-          ? 'sem conexão com o VPS (túnel SSH indisponível ou CORS recusado)'
-          : message,
-        0
-      );
-    } finally {
-      window.clearTimeout(timer);
+      if (err instanceof ApiError) throw new TriadeApiError(err.message, err.status, err.code);
+      throw err;
     }
   }
 
@@ -325,15 +290,23 @@ export class TriadeApiClient {
     onStatusTick: () => void;
   }): () => void {
     let stopped = false;
-    let es: EventSource | null = null;
+    let es: StreamSource | null = null;
     let pollTimer: number | null = null;
     let retryTimer: number | null = null;
     let attempt = 0;
+    let probing = false;
 
     const stopPoll = () => {
       if (pollTimer !== null) {
         window.clearInterval(pollTimer);
         pollTimer = null;
+      }
+    };
+
+    const stopRetry = () => {
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
       }
     };
 
@@ -356,12 +329,12 @@ export class TriadeApiClient {
 
     const connect = () => {
       if (stopped) return;
-      if (typeof EventSource === 'undefined') {
-        startPoll();
-        return;
-      }
+      const url = '/api/v2/stream?agent=all';
+      let source: StreamSource;
       try {
-        es = new EventSource(`${this.apiBase}/api/v2/stream?agent=all`);
+        source = streamSourceFactory
+          ? streamSourceFactory(url)
+          : (new EventSource(url) as unknown as StreamSource);
       } catch {
         handlers.onConnectionChange('reconnecting');
         startPoll();
@@ -369,12 +342,13 @@ export class TriadeApiClient {
         scheduleRetry();
         return;
       }
-      es.addEventListener('hello', () => {
+      es = source;
+      source.addEventListener('hello', () => {
         attempt = 0;
         stopPoll();
         handlers.onConnectionChange('sse');
       });
-      es.addEventListener('journal', (event) => {
+      source.addEventListener('journal', (event) => {
         try {
           const data = JSON.parse((event as MessageEvent).data) as unknown;
           const mapped = mapTimeline({ events: [data], ok: true }).events[0];
@@ -383,19 +357,48 @@ export class TriadeApiClient {
           // ignore malformed SSE frame
         }
       });
-      es.addEventListener('status', () => {
+      source.addEventListener('status', () => {
         handlers.onStatusTick();
       });
-      es.addEventListener('ping', () => {
+      source.addEventListener('ping', () => {
         if (attempt === 0) handlers.onConnectionChange('sse');
       });
-      es.onerror = () => {
-        handlers.onConnectionChange('reconnecting');
-        es?.close();
+      source.addEventListener('auth', () => {
+        stopped = true;
+        const current = es;
         es = null;
-        attempt += 1;
-        if (attempt >= 2) startPoll();
-        scheduleRetry();
+        current?.close();
+        stopPoll();
+        stopRetry();
+        markUnauthenticated();
+      });
+      source.onerror = () => {
+        const current = es;
+        es = null;
+        current?.close();
+        if (stopped || probing) return;
+        probing = true;
+        handlers.onConnectionChange('reconnecting');
+        void (async () => {
+          let alive = false;
+          try {
+            alive = await probeSession();
+          } catch {
+            alive = false;
+          }
+          probing = false;
+          if (stopped) return;
+          if (!alive) {
+            stopped = true;
+            stopPoll();
+            stopRetry();
+            markUnauthenticated();
+            return;
+          }
+          attempt += 1;
+          if (attempt >= 2) startPoll();
+          scheduleRetry();
+        })();
       };
     };
 
@@ -405,7 +408,7 @@ export class TriadeApiClient {
       stopped = true;
       es?.close();
       stopPoll();
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      stopRetry();
     };
   }
 }
