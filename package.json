@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/api/map.test.ts",
+    "test": "tsx --test src/api/map.test.ts src/api/admin.test.ts",
     "stub": "node scripts/api-stub.mjs"
   },
   "dependencies": {

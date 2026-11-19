@@ -1,3 +1,4 @@
+import { readApiBase } from './env';
 import {
   annotateAlertModes,
   attachInfra,
@@ -43,12 +44,6 @@ export interface TriadeClientConfig {
   token: string;
 }
 
-function readEnvBase(): string {
-  const fromApi = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
-  const fromLegacy = (import.meta.env.VITE_TRIADE_API_BASE as string | undefined)?.trim();
-  return (fromApi || fromLegacy || '').replace(/\/+$/, '');
-}
-
 const ENV_TOKEN = (import.meta.env.VITE_TRIADE_TOKEN as string | undefined)?.trim() || '';
 
 export class TriadeApiError extends Error {
@@ -66,7 +61,7 @@ export class TriadeApiError extends Error {
  * Dev over the SSH tunnel uses `VITE_API_BASE=http://127.0.0.1:8765`.
  */
 export class TriadeApiClient {
-  private apiBase: string = readEnvBase();
+  private apiBase: string = readApiBase();
   private token: string = ENV_TOKEN;
   private localAck = new Set<string>();
   private agentModes: Partial<Record<AgentId, 'live' | 'paper'>> = {};

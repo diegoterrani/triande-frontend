@@ -105,6 +105,9 @@ export const AppShell: React.FC<{
   connection: ConnectionState;
   role: UserRole;
   operatorName: string;
+  adminUser: string | null;
+  adminOpen: boolean;
+  onOpenAdmin: () => void;
   tunnelEnv: string;
   stub: boolean;
   onOpenKillAll: () => void;
@@ -120,6 +123,9 @@ export const AppShell: React.FC<{
   connection,
   role,
   operatorName,
+  adminUser,
+  adminOpen,
+  onOpenAdmin,
   tunnelEnv,
   stub,
   onOpenKillAll,
@@ -147,7 +153,7 @@ export const AppShell: React.FC<{
         target?.tagName === 'TEXTAREA' ||
         target?.tagName === 'SELECT' ||
         target?.isContentEditable;
-      if (inInput) return;
+      if (inInput || adminOpen) return;
 
       if (e.key === '/') {
         e.preventDefault();
@@ -169,7 +175,7 @@ export const AppShell: React.FC<{
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onNavigate]);
+  }, [onNavigate, adminOpen]);
 
   const agentsList: AgentSummary[] = useMemo(() => {
     if (!status) return [];
@@ -266,8 +272,8 @@ export const AppShell: React.FC<{
                     .map((ag) =>
                       ag.contract_current ? `${ag.label} · ${ag.contract_current}` : ag.label
                     )
-                    .join(', ')}). Conta real — nenhum comando de escrita sai deste painel.`
-                : 'Todos os agentes em modo PAPEL.'}
+                    .join(', ')}). Conta real. Escrita só em Administração, com sessão e TOTP.`
+                : 'Todos os agentes em modo PAPEL. O live da cripto só liga em Administração, depois dos pré-requisitos.'}
             </span>
           </div>
           <span className="hidden md:inline font-mono text-[11px] text-[#8b9bb4]">{tunnelEnv}</span>
@@ -352,7 +358,9 @@ export const AppShell: React.FC<{
           <div className="border-t border-[#30363d] p-3 hidden xl:block">
             <div className="text-xs min-w-0">
               <div className="font-medium text-[#e6edf3] truncate">{operatorName}</div>
-              <div className="text-[11px] text-[#8b9bb4] font-mono">auth_required: false · {role}</div>
+              <div className="text-[11px] text-[#8b9bb4]">
+                {adminUser ? 'sessão admin ativa' : 'sessão admin ausente'}
+              </div>
             </div>
           </div>
         </aside>
@@ -441,6 +449,17 @@ export const AppShell: React.FC<{
 
               <button
                 type="button"
+                onClick={onOpenAdmin}
+                aria-haspopup="dialog"
+                aria-expanded={adminOpen}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#7aa2f7]/50 bg-[#7aa2f7]/10 px-2.5 py-1.5 text-xs font-semibold text-[#7aa2f7] hover:bg-[#7aa2f7]/20 whitespace-nowrap"
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${adminUser ? 'bg-[#3fb950]' : 'bg-[#8b9bb4]'}`} />
+                Administração
+              </button>
+
+              <button
+                type="button"
                 disabled
                 onClick={onOpenKillAll}
                 aria-label="Kill all indisponível: backend somente leitura"
@@ -513,6 +532,16 @@ export const AppShell: React.FC<{
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenAdmin();
+                  setMobileDrawerOpen(false);
+                }}
+                className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-xs font-semibold text-[#7aa2f7]"
+              >
+                Administração
+              </button>
               {NAV_ITEMS.map((item) => {
                 const Icon = item.icon;
                 return (
@@ -536,7 +565,7 @@ export const AppShell: React.FC<{
               })}
             </div>
             <div className="border-t border-[#30363d] p-3 text-xs text-[#8b9bb4]">
-              {operatorName} · sem autenticação ({role})
+              {operatorName} · {adminUser ? 'sessão admin ativa' : 'sessão admin ausente'}
             </div>
           </div>
         </div>

@@ -41,6 +41,17 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Same-origin proxy so the admin session cookie works on the local stub.
+      // Example: VITE_DEV_PROXY=http://127.0.0.1:8766 VITE_API_BASE= npm run dev
+      proxy: process.env.VITE_DEV_PROXY
+        ? {
+            '/api': {
+              target: process.env.VITE_DEV_PROXY,
+              changeOrigin: true,
+              secure: false,
+            },
+          }
+        : undefined,
     },
   };
 });

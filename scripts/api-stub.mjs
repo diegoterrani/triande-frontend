@@ -2,7 +2,12 @@
  * Local /api/v2 stub built from the contract examples.
  * Responses set stub:true on /health so the UI shows STUB LOCAL.
  * This is not the VPS and must not be treated as live account data.
+ *
+ * `/api/v2/admin/*` is a stateful stand-in for the admin contract:
+ * any unused 6-digit TOTP is accepted, a key containing WITHDRAW fails
+ * the permission test, and secrets are never written to the log or the audit.
  */
+import { randomBytes } from 'node:crypto';
 import http from 'node:http';
 
 const PORT = Number(process.env.STUB_PORT || 8766);
@@ -416,6 +421,518 @@ const audit = {
   note: 'Arquivo var/dashboard/audit.jsonl ainda não existe. Não há endpoints de escrita neste servidor; a UI deve exibir estado vazio.',
 };
 
+const IP_RESTRICTED =
+  'A chave está restrita por IP. Confirme que o IP da VPS (169.58.230.95) está na lista branca.';
+const IP_OPEN =
+  'A chave não está restrita por IP. Restrinja a chave ao IP da VPS 169.58.230.95 e deixe só permissão de trade, sem saque.';
+
+const RISK_BOUNDS = {
+  max_capital: { min: 100, max: 50000 },
+  max_order_size: { min: 10, max: 20000 },
+  daily_loss_limit: { min: 10, max: 5000 },
+  max_trades_per_day: { min: 1, max: 20 },
+  max_open_positions: { min: 1, max: 3 },
+  max_drawdown: { min: 0.01, max: 0.1 },
+};
+const ALLOWED_PAIRS = ['BTCUSDT', 'ETHUSDT'];
+
+const adminState = {
+  session: null,
+  usedTotp: new Set(),
+  configured: false,
+  apiKeyMasked: null,
+  withdrawalsKey: false,
+  lastTest: null,
+  liveYaml: false,
+  adminLive: false,
+  limits: null,
+  audit: [],
+};
+
+function saoPauloNow() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date())
+      .map((part) => [part.type, part.value])
+  );
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}-03:00`;
+}
+
+function maskKey(key) {
+  return `••••${String(key).slice(-4)}`;
+}
+
+function clientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  return req.socket?.remoteAddress || '127.0.0.1';
+}
+
+function pushAudit(req, action, ok, detail, before, after) {
+  adminState.audit.unshift({
+    ts: saoPauloNow(),
+    who: adminState.session?.user || 'diego',
+    ip: clientIp(req),
+    action,
+    ok,
+    detail,
+    before,
+    after,
+  });
+  if (adminState.audit.length > 500) adminState.audit.length = 500;
+}
+
+function cookieValue(req, name) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) return decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return '';
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 64 * 1024) {
+        const error = new Error('payload');
+        error.status = 413;
+        finish(reject, error);
+        req.destroy();
+      } else {
+        chunks.push(chunk);
+      }
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw.trim()) {
+        finish(resolve, {});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        finish(resolve, parsed && typeof parsed === 'object' ? parsed : {});
+      } catch {
+        const error = new Error('json');
+        error.status = 400;
+        finish(reject, error);
+      }
+    });
+    req.on('error', (error) => finish(reject, error));
+  });
+}
+
+function currentSession(req) {
+  if (!adminState.session) return null;
+  const got = cookieValue(req, 'triade_admin_session');
+  if (!got || got !== adminState.session.id) return null;
+  if (Date.now() / 1000 >= adminState.session.expiresAt) {
+    adminState.session = null;
+    return null;
+  }
+  return adminState.session;
+}
+
+function consumeTotp(raw, login) {
+  const totp = String(raw ?? '').trim();
+  const invalid = !/^\d{6}$/.test(totp) || adminState.usedTotp.has(totp);
+  if (invalid) {
+    return login
+      ? { ok: false, status: 401, code: 'login_failed', error: 'usuário, senha ou código 2FA inválidos' }
+      : { ok: false, status: 403, code: 'totp', error: 'código 2FA ausente, inválido ou reutilizado' };
+  }
+  adminState.usedTotp.add(totp);
+  return { ok: true };
+}
+
+function requireWrite(req, body) {
+  const session = currentSession(req);
+  if (!session) {
+    return { ok: false, status: 401, code: 'unauthenticated', error: 'sessão ausente ou expirada' };
+  }
+  const header = req.headers['x-csrf-token'];
+  const csrf = (Array.isArray(header) ? header[0] : header) || body.csrf_token;
+  if (!csrf || csrf !== session.csrf) {
+    return { ok: false, status: 403, code: 'csrf', error: 'CSRF ausente ou inválido' };
+  }
+  const totpHeader = req.headers['x-totp'];
+  const totp = (Array.isArray(totpHeader) ? totpHeader[0] : totpHeader) || body.totp;
+  const checked = consumeTotp(totp, false);
+  if (!checked.ok) return checked;
+  return { ok: true, session };
+}
+
+function binancePayload() {
+  return {
+    ok: true,
+    configured: adminState.configured,
+    api_key_masked: adminState.configured ? adminState.apiKeyMasked : null,
+    last_test: adminState.lastTest,
+    ip_restriction_note:
+      adminState.lastTest?.ip_restriction_note ||
+      (adminState.configured
+        ? IP_OPEN
+        : 'Crie a chave só com trade e restrição de IP para 169.58.230.95. Não habilite saques.'),
+    live_enabled_yaml: adminState.liveYaml,
+    admin_live_enabled: adminState.adminLive,
+  };
+}
+
+function applyLiveFlag(enabled) {
+  adminState.liveYaml = enabled;
+  adminState.adminLive = enabled;
+  status.agents.crypto.live_enabled = enabled;
+  status.agents.crypto.mode = enabled ? 'live' : 'paper';
+}
+
+function validateLimits(source) {
+  const integerKeys = new Set(['max_trades_per_day', 'max_open_positions']);
+  for (const [key, bound] of Object.entries(RISK_BOUNDS)) {
+    const value = source[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return `${key} fora dos limites (${bound.min}–${bound.max}).`;
+    }
+    if (integerKeys.has(key) && !Number.isInteger(value)) {
+      return `${key} fora dos limites (${bound.min}–${bound.max}).`;
+    }
+    if (value < bound.min || value > bound.max) {
+      return `${key} fora dos limites (${bound.min}–${bound.max}).`;
+    }
+  }
+  const pairs = source.allowed_pairs;
+  if (!Array.isArray(pairs) || pairs.length === 0) return 'allowed_pairs não pode ser vazio.';
+  if (pairs.some((pair) => !ALLOWED_PAIRS.includes(pair))) {
+    return 'allowed_pairs só aceita BTCUSDT e ETHUSDT.';
+  }
+  return '';
+}
+
+async function handleAdmin(req, res, url) {
+  const path = url.pathname;
+  const method = req.method || 'GET';
+  const known = {
+    '/api/v2/admin/login': 'POST',
+    '/api/v2/admin/logout': 'POST',
+    '/api/v2/admin/session': 'GET',
+    '/api/v2/admin/binance': 'GET',
+    '/api/v2/admin/binance/test': 'POST',
+    '/api/v2/admin/crypto/risk': 'GET',
+    '/api/v2/admin/crypto/live': 'POST',
+    '/api/v2/admin/crypto/kill': 'POST',
+    '/api/v2/admin/crypto/flatten': 'POST',
+    '/api/v2/admin/b3/kill': 'POST',
+    '/api/v2/admin/audit': 'GET',
+  };
+  if (!(path in known) && path !== '/api/v2/admin/binance' && path !== '/api/v2/admin/crypto/risk') {
+    sendJson(res, 404, { ok: false, error: 'rota admin desconhecida', code: 'not_found' });
+    return;
+  }
+  const needsBody = method === 'POST' || method === 'PUT';
+  if (path === '/api/v2/admin/binance' && method !== 'GET' && method !== 'PUT') {
+    sendJson(res, 405, { ok: false, error: 'método não permitido', code: 'method_not_allowed' });
+    return;
+  }
+  if (path === '/api/v2/admin/crypto/risk' && method !== 'GET' && method !== 'PUT') {
+    sendJson(res, 405, { ok: false, error: 'método não permitido', code: 'method_not_allowed' });
+    return;
+  }
+  if (path !== '/api/v2/admin/binance' && path !== '/api/v2/admin/crypto/risk' && known[path] !== method) {
+    sendJson(res, 405, { ok: false, error: 'método não permitido', code: 'method_not_allowed' });
+    return;
+  }
+
+  const body = needsBody ? await readJsonBody(req) : {};
+
+  if (path === '/api/v2/admin/login') {
+    const username = typeof body.username === 'string' ? body.username.trim() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!username || !password) {
+      pushAudit(req, 'login', false, 'login_failed', null, null);
+      sendJson(res, 401, { ok: false, error: 'usuário, senha ou código 2FA inválidos', code: 'login_failed' });
+      return;
+    }
+    const totp = consumeTotp(body.totp, true);
+    if (!totp.ok) {
+      pushAudit(req, 'login', false, 'login_failed', null, null);
+      sendJson(res, totp.status, { ok: false, error: totp.error, code: totp.code });
+      return;
+    }
+    const expiresAt = Date.now() / 1000 + 8 * 3600;
+    adminState.session = {
+      id: randomBytes(24).toString('hex'),
+      csrf: randomBytes(24).toString('hex'),
+      user: username,
+      createdAt: saoPauloNow(),
+      expiresAt,
+    };
+    pushAudit(req, 'login', true, null, null, { user: username });
+    sendJson(
+      res,
+      200,
+      { ok: true, user: username, csrf_token: adminState.session.csrf, expires_at: expiresAt },
+      `triade_admin_session=${encodeURIComponent(adminState.session.id)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`
+    );
+    return;
+  }
+
+  if (path === '/api/v2/admin/session' && method === 'GET') {
+    const session = currentSession(req);
+    if (!session) {
+      sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: true,
+      user: session.user,
+      csrf_token: session.csrf,
+      created_at: session.createdAt,
+      expires_at: session.expiresAt,
+    });
+    return;
+  }
+
+  if (method === 'GET' && path === '/api/v2/admin/binance') {
+    if (!currentSession(req)) {
+      sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+      return;
+    }
+    sendJson(res, 200, binancePayload());
+    return;
+  }
+
+  if (method === 'GET' && path === '/api/v2/admin/crypto/risk') {
+    if (!currentSession(req)) {
+      sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+      return;
+    }
+    sendJson(res, 200, { ok: true, limits: adminState.limits, bounds: RISK_BOUNDS, allowed_pairs: ALLOWED_PAIRS });
+    return;
+  }
+
+  if (method === 'GET' && path === '/api/v2/admin/audit') {
+    if (!currentSession(req)) {
+      sendJson(res, 401, { ok: false, error: 'sessão ausente ou expirada', code: 'unauthenticated' });
+      return;
+    }
+    sendJson(res, 200, { ok: true, count: adminState.audit.length, entries: adminState.audit });
+    return;
+  }
+
+  const gate = requireWrite(req, body);
+  if (!gate.ok) {
+    if (gate.code === 'totp') pushAudit(req, 'stepup_totp', false, gate.error, null, null);
+    sendJson(res, gate.status, { ok: false, error: gate.error, code: gate.code });
+    return;
+  }
+
+  if (path === '/api/v2/admin/logout') {
+    pushAudit(req, 'logout', true, null, null, null);
+    adminState.session = null;
+    sendJson(
+      res,
+      200,
+      { ok: true, message: 'sessão encerrada' },
+      'triade_admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
+    );
+    return;
+  }
+
+  if (path === '/api/v2/admin/binance' && method === 'PUT') {
+    const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
+    const apiSecret = typeof body.api_secret === 'string' ? body.api_secret.trim() : '';
+    if (!apiKey || !apiSecret) {
+      sendJson(res, 400, { ok: false, error: 'informe api_key e api_secret', code: 'invalid' });
+      return;
+    }
+    const before = { configured: adminState.configured };
+    adminState.configured = true;
+    adminState.apiKeyMasked = maskKey(apiKey);
+    adminState.withdrawalsKey = /WITHDRAW/i.test(apiKey);
+    adminState.lastTest = null;
+    const after = { configured: true, api_key: adminState.apiKeyMasked };
+    pushAudit(req, 'binance_credentials_put', true, null, before, after);
+    sendJson(res, 200, { ok: true, configured: true, api_key_masked: adminState.apiKeyMasked, tested: false });
+    return;
+  }
+
+  if (path === '/api/v2/admin/binance/test') {
+    if (!adminState.configured) {
+      pushAudit(req, 'binance_test', false, 'not_configured', null, null);
+      sendJson(res, 412, { ok: false, error: 'ainda não há chave no cofre', code: 'not_configured' });
+      return;
+    }
+    if (adminState.withdrawalsKey) {
+      const result = {
+        ok: false,
+        tested_at: saoPauloNow(),
+        withdrawals_enabled: true,
+        ip_restrict: false,
+        enable_futures: true,
+        enable_spot_and_margin_trading: true,
+        enable_internal_transfer: null,
+        error: 'a chave permite saques; recusada (fail-closed)',
+        ip_restriction_note: IP_OPEN,
+      };
+      adminState.lastTest = result;
+      pushAudit(req, 'binance_test', false, result.error, null, { withdrawals_enabled: true });
+      sendJson(res, 412, {
+        ok: false,
+        error: result.error,
+        code: 'permissions_failed',
+        result,
+      });
+      return;
+    }
+    const result = {
+      ok: true,
+      tested_at: saoPauloNow(),
+      withdrawals_enabled: false,
+      ip_restrict: true,
+      enable_futures: true,
+      enable_spot_and_margin_trading: true,
+      enable_internal_transfer: null,
+      error: null,
+      ip_restriction_note: IP_RESTRICTED,
+    };
+    adminState.lastTest = result;
+    pushAudit(req, 'binance_test', true, null, null, { withdrawals_enabled: false, ip_restrict: true });
+    sendJson(res, 200, { ok: true, result });
+    return;
+  }
+
+  if (path === '/api/v2/admin/crypto/risk' && method === 'PUT') {
+    const source = body.limits && typeof body.limits === 'object' ? body.limits : body;
+    const problem = validateLimits(source);
+    if (problem) {
+      pushAudit(req, 'crypto_risk_put', false, problem, adminState.limits, null);
+      sendJson(res, 400, { ok: false, error: problem, code: 'bounds' });
+      return;
+    }
+    const before = adminState.limits;
+    const stored = {
+      max_capital: source.max_capital,
+      max_order_size: source.max_order_size,
+      daily_loss_limit: source.daily_loss_limit,
+      max_trades_per_day: source.max_trades_per_day,
+      max_open_positions: source.max_open_positions,
+      allowed_pairs: ALLOWED_PAIRS.filter((pair) => source.allowed_pairs.includes(pair)),
+      max_drawdown: source.max_drawdown,
+      updated_at: saoPauloNow(),
+      source: 'admin',
+    };
+    adminState.limits = stored;
+    const stamp = saoPauloNow().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const backup = `crypto.yaml.bak-admin-${stamp}`;
+    pushAudit(req, 'crypto_risk_put', true, null, before, stored);
+    sendJson(res, 200, { ok: true, limits: stored, backup });
+    return;
+  }
+
+  if (path === '/api/v2/admin/crypto/live') {
+    let enabled = null;
+    if (body.enabled === true || body.enabled === false) enabled = body.enabled;
+    else if (body.action === 'enable') enabled = true;
+    else if (body.action === 'disable') enabled = false;
+    if (enabled === null) {
+      sendJson(res, 400, { ok: false, error: 'informe enabled', code: 'invalid' });
+      return;
+    }
+    const expected = enabled ? 'ENABLE CRYPTO LIVE' : 'DISABLE CRYPTO LIVE';
+    if (body.confirmation !== expected) {
+      sendJson(res, 400, {
+        ok: false,
+        error: `a frase precisa ser exatamente ${expected}`,
+        code: 'confirmation',
+      });
+      return;
+    }
+    if (enabled) {
+      const missing = [];
+      if (!adminState.configured) missing.push('credenciais Binance');
+      if (!adminState.lastTest?.ok || adminState.lastTest.withdrawals_enabled !== false) {
+        missing.push('teste de permissões');
+      }
+      if (!adminState.limits || adminState.limits.source !== 'admin') missing.push('limites de risco');
+      if (missing.length) {
+        pushAudit(req, 'crypto_live_enable', false, missing.join(', '), null, null);
+        sendJson(res, 412, {
+          ok: false,
+          error: 'pré-requisitos do live não foram atendidos',
+          code: 'preconditions',
+          missing,
+        });
+        return;
+      }
+    }
+    applyLiveFlag(enabled);
+    const note = enabled
+      ? 'O flag live foi gravado. O agente crypto NÃO é iniciado automaticamente. Ligue a unit só depois de revisar o painel.'
+      : 'O flag live foi desligado. A unit do agente não foi alterada por este painel.';
+    pushAudit(req, enabled ? 'crypto_live_enable' : 'crypto_live_disable', true, null, null, {
+      live_enabled: enabled,
+      unit_started: false,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      live_enabled: enabled,
+      admin_live_enabled: enabled,
+      unit_started: false,
+      note,
+    });
+    return;
+  }
+
+  if (path === '/api/v2/admin/crypto/kill') {
+    if (status.agents.crypto.kill) status.agents.crypto.kill.agent = true;
+    pushAudit(req, 'crypto_kill', true, null, null, { kill_flag: 'var/crypto/KILL' });
+    sendJson(res, 200, { ok: true, agent: 'crypto', kill_flag: 'var/crypto/KILL' });
+    return;
+  }
+
+  if (path === '/api/v2/admin/crypto/flatten') {
+    if (status.agents.crypto.kill) status.agents.crypto.kill.agent = true;
+    const note =
+      'Kill gravado. O flatten na corretora deve ser feito pelo comando oficial do agente, com o live já revisado.';
+    pushAudit(req, 'crypto_flatten', true, note, null, { broker_called: false, kill_flag: 'var/crypto/KILL' });
+    sendJson(res, 200, {
+      ok: true,
+      agent: 'crypto',
+      kill_flag: 'var/crypto/KILL',
+      broker_called: false,
+      note,
+    });
+    return;
+  }
+
+  if (path === '/api/v2/admin/b3/kill') {
+    if (status.agents.b3.kill) status.agents.b3.kill.agent = true;
+    pushAudit(req, 'b3_kill', true, null, null, { kill_flag: 'var/b3/KILL' });
+    sendJson(res, 200, { ok: true, agent: 'b3', kill_flag: 'var/b3/KILL' });
+    return;
+  }
+
+  sendJson(res, 404, { ok: false, error: 'rota admin desconhecida', code: 'not_found' });
+}
+
 function route(url) {
   const path = url.pathname;
   if (path === '/api/v2/health' || path === '/api/health') return health;
@@ -444,11 +961,22 @@ function route(url) {
   return null;
 }
 
-const server = http.createServer((req, res) => {
+function sendJson(res, statusCode, body, cookie) {
+  if (cookie) res.setHeader('Set-Cookie', cookie);
+  res.setHeader('Cache-Control', 'no-store');
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(body));
+}
+
+const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin || 'http://127.0.0.1:3000';
   res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Accept, Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Accept, Authorization, Content-Type, X-CSRF-Token, X-TOTP'
+  );
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Vary', 'Origin');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -456,9 +984,22 @@ const server = http.createServer((req, res) => {
     return;
   }
   const url = new URL(req.url || '/', `http://127.0.0.1:${PORT}`);
+  if (url.pathname.startsWith('/api/v2/admin')) {
+    try {
+      await handleAdmin(req, res, url);
+    } catch (err) {
+      if (res.headersSent) return;
+      const statusCode = err?.status === 413 ? 413 : err?.status === 400 ? 400 : 500;
+      const code = statusCode === 413 ? 'payload_too_large' : statusCode === 400 ? 'invalid_json' : 'invalid';
+      const error =
+        statusCode === 413 ? 'corpo maior que 64 KiB' : statusCode === 400 ? 'JSON malformado' : 'falha no stub';
+      sendJson(res, statusCode, { ok: false, error, code });
+    }
+    return;
+  }
   if (req.method !== 'GET') {
     res.writeHead(405, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: false, error: 'somente leitura' }));
+    res.end(JSON.stringify({ ok: false, error: 'somente leitura', code: 'method_not_allowed' }));
     return;
   }
   if (url.pathname === '/api/v2/stream') {
